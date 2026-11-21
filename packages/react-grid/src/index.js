@@ -229,10 +229,18 @@ export const VirtualGrid = forwardRef(function VirtualGrid(props, ref) {
       : undefined,
   }), [has('format'), has('cellClass'), has('rowClass'), has('renderCell'), has('renderHeader'), has('emptyState'), store]); // eslint-disable-line react-hooks/exhaustive-deps
   const callbacks = useMemo(() => Object.fromEntries(CALLBACKS.map((k) => [k, (...args) => propsRef.current[k]?.(...args)])), []);
+  // sortable / filterable may be functions of the column or level: keep them stable like the hooks.
+  const isFn = (k) => typeof props[k] === 'function';
+  const rules = useMemo(() => ({
+    sortable: isFn('sortable') ? (target) => propsRef.current.sortable?.(target) : undefined,
+    filterable: isFn('filterable') ? (target) => propsRef.current.filterable?.(target) : undefined,
+  }), [isFn('sortable'), isFn('filterable')]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const options = {
     ...Object.fromEntries(PASS.map((k) => [k, props[k]])),
     ...stableObjects,
+    ...(rules.sortable && { sortable: rules.sortable }),
+    ...(rules.filterable && { filterable: rules.filterable }),
     ariaLabel: props['aria-label'],
     dataSource,
     columns,

@@ -267,9 +267,9 @@ export function createTableModel(options, layout, source, initial = {}) {
     },
     // Sorting keeps the row count; a filter changes it, so ask the data source how many rows match.
     // A column filter just changes which source columns are shown.
-    async applyView({ filter, colfilter = '', query }) {
+    async applyView({ filter, colfilter = '', query, signal, onProgress }) {
       if (filter !== currentFilter) {
-        const res = filter ? await source.getLayout({ query }) : { rowCount: model.totalRows };
+        const res = filter ? await source.getLayout({ query, signal, onProgress }) : { rowCount: model.totalRows };
         model.rows = new UniformAxis(res.rowCount, rowHeight);
         currentFilter = filter;
       }
@@ -405,9 +405,9 @@ export function createPivotModel(meta, source, options = {}, initial = {}) {
       return { kind: 'values', name, search: search('rows', key.dim) };
     },
     reload: ({ query }) => model.applyView({ colfilter: currentColFilter, query }),
-    async applyView({ colfilter = '', query }) {
+    async applyView({ colfilter = '', query, signal, onProgress }) {
       if (typeof source.getLayout !== 'function') throw new Error('this data source cannot sort or filter a pivot (no getLayout)');
-      const res = await source.getLayout({ query });
+      const res = await source.getLayout({ query, signal, onProgress });
       if (colfilter !== currentColFilter) {
         // New column layout: keep collapsed column groups (by original id); widths start fresh.
         const originalCol = (L, i) => (colMaps ? colMaps[L][i] : i);

@@ -110,3 +110,54 @@ test('http source speaks the reference protocol (server.mjs)', async (t) => {
   const vals = await pivot.getFilterValues({ axis: 'cols', level: 1, search: '2002', limit: 1000, query: EMPTY_QUERY });
   assert.deepEqual(vals, { total: 3, matches: 1, values: ['FY 2002'] });
 });
+
+test('demo backend: big filters are exact, and sorted results stay sorted', async () => {
+  const { handleApiRequest } = await import('../demo-backend.mjs');
+  const call = async (path, extra) => (await handleApiRequest({ url: new URL(`http://x/api/${path}?mode=flat&rows=6000000&cols=8&latency=0${extra}`) })).body;
+  const f = (cond) => `&filter=${encodeURIComponent(JSON.stringify([cond]))}`;
+  // 6M rows is above the exact-list limit, so this goes through the chunked path.
+  const inOslo = await call('meta', f({ c: 2, op: 'in', v: ['Oslo'] }));
+  const notOslo = await call('meta', f({ c: 2, op: 'notin', v: ['Oslo'] }));
+  assert.equal(inOslo.rows + notOslo.rows, 6_000_000);
+  for (const r0 of [0, 123_457, inOslo.rows - 3]) {
+    const block = await call('block', `${f({ c: 2, op: 'in', v: ['Oslo'] })}&r0=${r0}&c0=2&nr=3&nc=1`);
+    assert.deepEqual(block.cells, ['Oslo', 'Oslo', 'Oslo']);
+  }
+  const sorted = await call('block', `${f({ c: 2, op: 'in', v: ['Oslo'] })}&sort=3:d&r0=1000&c0=2&nr=50&nc=2`);
+  const amounts = sorted.cells.filter((_, i) => i % 2 === 1).map(Number);
+  assert.ok(sorted.cells.filter((_, i) => i % 2 === 0).every((c) => c === 'Oslo'));
+  assert.ok(amounts.every((a, i) => i === 0 || amounts[i - 1] >= a), 'descending by amount');
+});
+
+test('http source reports progress of a slow filter and can cancel it', async (t) => {
+  const port = 5800 + Math.floor(Math.random() * 500);
+  const server = spawn(process.execPath, ['server.mjs'], { env: { ...process.env, PORT: String(port) }, stdio: 'ignore' });
+  t.after(() => server.kill());
+  const base = `http://127.0.0.1:${port}/api`;
+  for (let i = 0; i < 50; i++) {
+    try {
+      await fetch(`${base}/meta`);
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  const src = createHttpSource({ baseUrl: base, params: { mode: 'flat', rows: 400_000_000, cols: 8, latency: 0 } });
+  const query = q({ filter: [{ column: 5, op: 'in', values: ['Active'] }] });
+  const seen = [];
+  const ctrl = new AbortController();
+  const pending = src.getLayout({ query, signal: ctrl.signal, onProgress: (p) => seen.push(p) });
+  while (!seen.length) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(seen[0].phase, 'Checking rows');
+  assert.equal(seen[0].total, 400_000_000);
+  ctrl.abort();
+  await assert.rejects(pending, (err) => err.name === 'AbortError');
+  // The server stops the scan once nobody waits for it.
+  let progress;
+  for (let i = 0; i < 20; i++) {
+    progress = await (await fetch(`${base}/progress?mode=flat&rows=400000000&cols=8&filter=${encodeURIComponent(JSON.stringify([{ c: 5, op: 'in', v: ['Active'] }]))}`)).json();
+    if (!progress.active) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(progress.active, false);
+});

@@ -196,6 +196,24 @@ like this:
 Value lists suit columns with a modest set of repeated values (status, city, owner); text search suits
 near-unique ones (names, codes).
 
+### Choosing what can be sorted and filtered
+
+`sortable: false` and `filterable: false` turn sorting or filtering off for the whole grid, and the same on a
+column (`sortable: false`, `filter: false`) turns it off for that column. To decide in one place, or for pivot
+levels, which have no column definitions, pass a function. It is asked about each column and level and
+returns `false` to turn that one off:
+
+```js
+createGrid(el, {
+  dataSource,
+  columns,
+  // Columns: { axis: 'cols', column, key }. Pivot row levels: { axis: 'rows', level }.
+  sortable: (target) => target.key !== 'notes',
+  // Filters also cover pivot column levels and the column chooser: { axis: 'cols', level }.
+  filterable: (target) => target.axis !== 'rows' || target.level < 2,
+});
+```
+
 ### Custom filters
 
 ```js
@@ -277,7 +295,28 @@ With SQL, `filter` becomes a parameterized `WHERE`, `sort` becomes `ORDER BY` (a
 order is stable), and a rect becomes rows `row` to `row + rowCount - 1` of that order. Map `key` to column
 names through an allow-list on the server; never put client text into SQL.
 
-If your backend can't sort or filter very large tables, return `maxSortRows` / `maxFilterRows` from
+### Slow sorts and filters
+
+Sorting or filtering a huge table can take a while. When it takes more than a moment, the grid shows what it
+is doing with a Cancel button (in the filter dialog, or in a notice for sorts). `getLayout` receives an
+`onProgress` callback to say how far it is; cancelling aborts its `signal`, so pass that on to `fetch` or
+your database query:
+
+```js
+async getLayout({ query, signal, onProgress }) {
+  const job = await startCount(query, { signal });
+  while (!job.done) {
+    onProgress({ phase: 'Checking rows', done: job.checked, total: job.rows }); // "Filtering… Checking rows · 42% · 7 s"
+    await job.next();
+  }
+  return { rowCount: job.count };
+}
+```
+
+`grid.cancel()` stops it from code, and `onViewChange` reports `{ pending: true, progress }` along the way and
+`{ cancelled: true }` if it is stopped.
+
+If your backend can't sort or filter very large tables at all, return `maxSortRows` / `maxFilterRows` from
 `getLayout`. The grid then explains the limit to the user instead of sending requests that would fail.
 
 ### Ready-made sources
@@ -297,6 +336,7 @@ If your backend can't sort or filter very large tables, return `maxSortRows` / `
   | `POST {baseUrl}/gather` with `{ rects: [[r0, c0, nr, nc], …] }` | `{ cells: [one row-major array per rect] }` |
   | `GET {baseUrl}/labels?axis&level&from&n` | `{ names }` |
   | `GET {baseUrl}/values?axis&level&q&limit` | `{ values, total, matches }` |
+  | `GET {baseUrl}/progress` with the same query as `meta` (optional) | `{ active, phase, done, total }` while `meta` works |
 
 ## Selection and copy
 
@@ -435,15 +475,15 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 
 | Option | Type | Default | |
 |---|---|---|---|
-| `sortable` | `boolean` | `true` | sorting from headers and the keyboard |
+| `sortable` | `boolean \| (target) => boolean` | `true` | sorting from headers and the keyboard; a function decides per column or level ([choosing](#choosing-what-can-be-sorted-and-filtered)) |
 | `multiSort` | `boolean` | `true` | Shift+click adds columns to the sort |
-| `filterable` | `boolean` | `true` | filter buttons in headers |
+| `filterable` | `boolean \| (target) => boolean` | `true` | filter buttons in headers; a function decides per column or level |
 | `resizable` | `boolean` | `true` | drag header edges to resize columns |
 | `expandable` | `boolean` | `true` | expand and collapse pivot groups |
 | `selection` | `'multi' \| 'single' \| 'none'` | `'multi'` | |
 | `copy` | `boolean` | `true` | ⌘C / Ctrl+C copies the selection |
 | `keyboard` | `boolean` | `true` | keyboard navigation |
-| `notices` | `boolean` | `true` | a short message when a sort or filter is refused or fails; turn it off to show `onViewChange` yourself |
+| `notices` | `boolean` | `true` | short messages in the grid: copies, and slow, refused or failed sorts and filters; turn it off to show `onCopy` / `onViewChange` yourself |
 | `columnChooser` | `boolean` | on when columns have a `group` | a corner menu to show and hide column groups |
 
 #### Look
@@ -480,7 +520,7 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `onSelectionChange` | `{ active, text, ranges, rows, cols, cells }` |
 | `onCopy` | `{ ok, cells, rows, cols, ms, reason? }` |
 | `onColumnResize` | `{ column, key, width }`, when the user lets go |
-| `onViewChange` | `{ what, pending }` while a sort or filter runs, then `{ what, ok, rows, reason? }` |
+| `onViewChange` | `{ what, pending, progress? }` while a sort or filter runs, then `{ what, ok, rows, reason? }` or `{ what, cancelled: true }` |
 | `onError` | `(error, { kind: 'layout' \| 'cells' \| 'labels' })`; errors are logged when this is not set |
 | `onReady` | `(grid)` once the grid is drawn |
 
@@ -516,6 +556,7 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `setSort(sort)`, `setFilter(filter)`, `setColumnFilter(list)` | change them; resolve to `false` if refused |
 | `toggleSort(column, additive?)` | what a header click does |
 | `openFilter(column)`, `closeFilter()` | the filter dialog |
+| `cancel()` | stop a sort or filter that is still running |
 | `scrollToCell(row, col?)` | bring a cell into view |
 | `getSelection()`, `setSelection(sel)`, `selectAll()`, `selectionInfo()` | selection |
 | `copySelection()` | copy, as with ⌘C / Ctrl+C |
@@ -531,7 +572,7 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | Member | | |
 |---|---|---|
 | `getCells({ rects, query, signal })` | required | cells for each rect |
-| `getLayout({ query, signal })` | needed for filtering and pivots | `{ rowCount, totalRowCount?, maxSortRows?, maxFilterRows? }` or a pivot layout |
+| `getLayout({ query, signal, onProgress })` | needed for filtering and pivots | `{ rowCount, totalRowCount?, maxSortRows?, maxFilterRows? }` or a pivot layout; may report [progress](#slow-sorts-and-filters) |
 | `getFilterValues({ column, key, search, limit, query, signal })` | optional | `{ values, total?, matches? }` |
 | `getLabels({ axis, level, start, count, query, signal })` | optional | header titles you did not put in the columns |
 | `maxRectsPerRequest`, `maxCellsPerRequest` | optional | at most this many rects (default 400) or cells (default 20,000) per `getCells` call |

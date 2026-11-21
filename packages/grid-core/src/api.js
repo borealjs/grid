@@ -103,8 +103,9 @@ export class Grid {
       theme: this.#theme,
       ariaLabel: o.ariaLabel,
       messages: o.messages,
-      sortable: o.sortable !== false,
-      filterable: o.filterable !== false,
+      // A function decides per column or level (see GridOptions.sortable); it always reads the latest option.
+      sortable: typeof o.sortable === 'function' ? (target) => this.#opts.sortable?.(target) : o.sortable !== false,
+      filterable: typeof o.filterable === 'function' ? (target) => this.#opts.filterable?.(target) : o.filterable !== false,
       resizable: o.resizable !== false,
       multiSort: o.multiSort !== false,
       expandable: o.expandable !== false,
@@ -261,6 +262,9 @@ export class Grid {
   }
 
   closeFilter() { this.#engine?.closeFilter(); }
+
+  /** Stop a sort or filter that is still being applied. Returns false when none is running. */
+  cancel() { return this.#engine?.cancelView() ?? false; }
 
   // ---------------------------------------------------------------- data and drawing
 

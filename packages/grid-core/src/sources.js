@@ -206,9 +206,11 @@ const columnFilterParam = (list) => (list.length ? JSON.stringify(columnFilterFr
  *   POST {baseUrl}/gather?sort&filter&colfilter  { rects }     -> { cells: [row-major per rect], merges }
  *   GET  {baseUrl}/labels?axis&level&from&n&…                 -> { names }
  *   GET  {baseUrl}/values?axis&level&q&limit                  -> { total, matches, values }
+ *   GET  {baseUrl}/progress?sort&filter&colfilter (optional)  -> { active, phase, done, total } while /meta works
  */
 export function createHttpSource({ baseUrl = '/api', params = {}, fetch: fetchImpl = globalThis.fetch.bind(globalThis), headers = {} } = {}) {
   const base = baseUrl.replace(/\/$/, '');
+  let progressSupported = true;
   const url = (path, query, view) => {
     const qs = new URLSearchParams(query);
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) qs.set(k, String(v));
@@ -238,8 +240,32 @@ export function createHttpSource({ baseUrl = '/api', params = {}, fetch: fetchIm
   return {
     maxRectsPerRequest: 400,
     maxCellsPerRequest: 20_000,
-    async getLayout({ query, signal }) {
-      const meta = await getJson(url('meta', {}, query), { signal });
+    async getLayout({ query, signal, onProgress }) {
+      // While the server sorts or filters, ask it how far it is ({base}/progress, same parameters).
+      // A server without that endpoint answers 404 once and is not asked again.
+      let done = false;
+      let timer = 0;
+      const poll = async () => {
+        try {
+          const res = await fetchImpl(url('progress', {}, query), { signal, headers });
+          if (res.status === 404) progressSupported = false;
+          else if (res.ok) {
+            const p = await res.json();
+            if (p.active && !done) onProgress({ phase: p.phase, done: p.done, total: p.total });
+          }
+        } catch {
+          // progress is optional
+        }
+        if (!done && progressSupported && !signal?.aborted) timer = setTimeout(poll, 500);
+      };
+      if (onProgress && progressSupported) timer = setTimeout(poll, 300);
+      let meta;
+      try {
+        meta = await getJson(url('meta', {}, query), { signal });
+      } finally {
+        done = true;
+        clearTimeout(timer);
+      }
       if (meta.mode === 'pivot') return { type: 'pivot', ...meta };
       return {
         type: 'table',

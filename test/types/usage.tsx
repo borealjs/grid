@@ -69,3 +69,12 @@ export function Readme({ customers }: { customers: Customer[] }) {
 // Accessible name: `aria-label` in React, `ariaLabel` in the core options.
 export const Labelled = ({ customers }: { customers: Customer[] }) => <VirtualGrid rows={customers} aria-label="Customers" />;
 createGrid(document.body, { dataSource: ds, ariaLabel: 'Customers' });
+
+// sortable / filterable per column or level; progress from getLayout.
+createGrid(document.body, {
+  dataSource: { getCells: () => [], getLayout: ({ onProgress }) => { onProgress?.({ phase: 'Checking rows', done: 1, total: 2 }); return { rowCount: 2 }; } },
+  sortable: (t) => t.axis === 'rows' || t.key !== 'notes',
+  filterable: (t) => !('level' in t) || t.level < 2,
+  onViewChange: (info) => console.log(info.progress?.done, info.cancelled),
+}).cancel();
+export const Rules = ({ customers }: { customers: Customer[] }) => <VirtualGrid rows={customers} sortable={(t) => t.axis === 'cols' && t.key !== 'name'} filterable={false} />;

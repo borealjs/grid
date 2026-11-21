@@ -41,9 +41,30 @@ export const DEFAULT_MESSAGES = {
   selectAll: 'Select all',
   columns: 'Columns',
   applying: 'Applying…',
+  cancel: 'Cancel',
+  // A sort or filter that takes a while; progress ({ phase, done, total }) comes from the data source.
+  working: (what, progress, seconds) => {
+    const verb = what === 'sort' ? 'Sorting' : what === 'columns' ? 'Updating columns' : 'Filtering';
+    const parts = [];
+    if (progress?.phase) parts.push(progress.phase);
+    if (progress?.total > 0) parts.push(`${Math.min(99, Math.floor((100 * progress.done) / progress.total))}%`);
+    if (seconds >= 1) parts.push(`${Math.round(seconds)} s`);
+    return parts.length ? `${verb}… ${parts.join(' · ')}` : `${verb}…`;
+  },
   filterLimit: (limit, total) => `Filtering is turned off for this table. Its server filters up to ${limit.toLocaleString()} rows, and this table has ${total.toLocaleString()}.`,
   sortLimit: (limit, total) => `Sorting by more than one column is turned off for this table. Its server sorts that way up to ${limit.toLocaleString()} rows, and this table has ${total.toLocaleString()}.`,
   failed: (what, reason) => `${what === 'sort' ? 'Sorting' : 'Filtering'} failed: ${reason}`,
+  copying: (cells) => `Copying ${cells.toLocaleString()} cells…`,
+  copied: (info) => {
+    const size = info.ranges > 1
+      ? `${info.cells.toLocaleString()} cells from ${info.ranges} ranges`
+      : `${info.rows.toLocaleString()} × ${info.cols.toLocaleString()} (${info.cells.toLocaleString()} ${info.cells === 1 ? 'cell' : 'cells'})`;
+    return `Copied ${size}${info.plainOnly ? ' as text' : ''}`;
+  },
+  copyTooLarge: (cells, limit) => `Selection too large to copy: ${cells.toLocaleString()} cells (limit ${limit.toLocaleString()})`,
+  copyRefused: 'The browser refused clipboard access',
+  copyLoadFailed: (reason) => `Could not load the cells: ${reason}`,
+  copyAgain: (loaded, shortcut) => `Loaded ${loaded.toLocaleString()} cells; press ${shortcut} again to copy`,
 };
 
 const MAX_SCROLL_PX = 10_000_000; // below every browser's max element size (Firefox ~17.8M, Chrome ~33.5M)
@@ -697,6 +718,7 @@ export class VirtualGrid {
   #view = null;
   #sortSeq = 0;
   #filterPop = null;
+  #work = null; // the sort / filter being applied: { what, ctrl, started, progress, timer }
   #emptyShown = false;
   #emptySig = '';
   #cornerSort = [];
@@ -1182,10 +1204,14 @@ export class VirtualGrid {
     const status = el('div', 'vg-filter-status', pop);
     status.setAttribute('role', 'status');
     const actions = el('div', 'vg-filter-actions', pop);
+    const cancel = el('button', 'vg-filter-cancel', actions, m.cancel);
     const clear = el('button', '', actions, m.clear);
     const apply = el('button', 'vg-filter-apply', actions, m.apply);
+    cancel.type = 'button';
     clear.type = 'button';
     apply.type = 'button';
+    cancel.hidden = true;
+    cancel.addEventListener('click', () => this.cancelView());
     const blocked = key.cdim === undefined ? this.#limitReason(this.sortSpec, [{}]) : '';
     if (blocked) {
       status.textContent = blocked;
@@ -1207,9 +1233,13 @@ export class VirtualGrid {
       apply.disabled = clear.disabled = true;
       status.classList.remove('vg-filter-error');
       status.textContent = m.applying;
+      cancel.hidden = false;
+      if (this.#filterPop?.pop === pop) this.#filterPop.status = status;
       const ok = await this.setColumnFilter(key, condition);
       if (this.#filterPop?.pop !== pop) return; // closed meanwhile
-      if (ok || !this.lastRefusal) {
+      this.#filterPop.status = null;
+      cancel.hidden = true;
+      if (ok || (!this.lastRefusal && !this.lastCancelled)) {
         this.closeFilter();
         this.scroller.focus({ preventScroll: true });
         return;
@@ -1218,7 +1248,7 @@ export class VirtualGrid {
       apply.disabled = !!blocked;
       clear.disabled = !current;
       status.textContent = this.lastRefusal;
-      status.classList.add('vg-filter-error');
+      status.classList.toggle('vg-filter-error', !!this.lastRefusal);
     };
     clear.addEventListener('click', () => finish(null));
     apply.addEventListener('click', () => finish(read()));
@@ -1246,7 +1276,7 @@ export class VirtualGrid {
       if (!pop.contains(e.target) && !(e.target instanceof Element && e.target.closest('.vg-filterbtn'))) this.closeFilter();
     };
     document.addEventListener('pointerdown', onOutside, true);
-    this.#filterPop = { pop, onOutside, onClose };
+    this.#filterPop = { pop, onOutside, onClose, status: null };
     pop.querySelector('input')?.focus();
   }
 
@@ -1289,17 +1319,48 @@ export class VirtualGrid {
       return false;
     };
     this.lastRefusal = '';
+    this.lastCancelled = false;
     const limitReason = this.#limitReason(sortList, filterList);
     if (limitReason) return refuse(limitReason);
     const token = ++this.#sortSeq;
+    // A newer sort or filter replaces one still running: stop that one.
+    this.#endView();
+    const view = { what, ctrl: new AbortController(), started: performance.now(), progress: null, timer: 0 };
+    this.#work = view;
+    // Work that takes more than a moment shows what it is doing, with a Cancel button.
+    view.timer = setTimeout(() => this.#showWork(view), 400);
+    const onProgress = (progress) => {
+      if (this.#work !== view) return;
+      view.progress = progress;
+      this.#showWork(view);
+      this.o.onViewChange?.({ pending: true, what, progress });
+    };
     this.o.onViewChange?.({ pending: true, what });
     try {
       // The model fetches what changes: the row count (filter) and, for a pivot, the reordered layout.
-      if (this.model.applyView) await this.model.applyView({ sort: sortParam, filter: filterParam, colfilter: colFilterParam, query: this.#publicQuery(sortList, filterList, colFilterList) });
+      if (this.model.applyView) {
+        await this.model.applyView({
+          sort: sortParam,
+          filter: filterParam,
+          colfilter: colFilterParam,
+          query: this.#publicQuery(sortList, filterList, colFilterList),
+          signal: view.ctrl.signal,
+          onProgress,
+        });
+      }
     } catch (err) {
-      if (token === this.#sortSeq) refuse(this.msg.failed(what === 'sort' ? 'sort' : 'filter', err.message));
+      const cancelled = view.ctrl.signal.aborted;
+      if (this.#work === view) this.#endView();
+      if (token !== this.#sortSeq) return false;
+      if (cancelled) {
+        this.lastCancelled = true;
+        this.o.onViewChange?.({ ok: false, what, cancelled: true });
+        return false;
+      }
+      refuse(this.msg.failed(what === 'sort' ? 'sort' : 'filter', err.message));
       return false;
     }
+    if (this.#work === view) this.#endView();
     if (token !== this.#sortSeq) return false; // a newer request won
     this.sortSpec = sortList;
     this.sortParam = sortParam;
@@ -1334,6 +1395,63 @@ export class VirtualGrid {
     return '';
   }
 
+  /**
+   * Whether the sortable / filterable option allows this key: a boolean for the whole grid, or a function
+   * of the column or level ({ axis: 'cols', column, key } | { axis: 'rows', level } | { axis: 'cols', level }).
+   */
+  #allowed(option, key) {
+    if (!key) return false;
+    const rule = this.o[option];
+    if (typeof rule !== 'function') return rule !== false;
+    const target = key.col !== undefined
+      ? { axis: 'cols', column: key.col, key: this.model.keyOf?.(key.col) }
+      : key.dim !== undefined ? { axis: 'rows', level: key.dim } : { axis: 'cols', level: key.cdim };
+    return rule(target) !== false;
+  }
+
+  /** Stop the sort or filter that is being applied (the data source gets an aborted signal). */
+  cancelView() {
+    if (!this.#work) return false;
+    this.#work.ctrl.abort();
+    return true;
+  }
+
+  /** "Filtering… Checking rows · 42% · 7 s" in the filter dialog, or in a notice with a Cancel button. */
+  #showWork(view) {
+    if (this.#work !== view) return;
+    const seconds = (performance.now() - view.started) / 1000;
+    const text = this.msg.working(view.what, view.progress, seconds);
+    const status = this.#filterPop?.status;
+    if (status) status.textContent = text;
+    else if (this.o.notices !== false && this.host) {
+      if (!this.workEl) {
+        this.workEl = document.createElement('div');
+        this.workEl.className = 'vg-notice vg-work';
+        this.workEl.setAttribute('role', 'status');
+        this.workText = this.workEl.appendChild(document.createElement('span'));
+        const stop = this.workEl.appendChild(document.createElement('button'));
+        stop.type = 'button';
+        stop.textContent = this.msg.cancel;
+        stop.addEventListener('click', () => this.cancelView());
+        this.host.appendChild(this.workEl);
+      }
+      this.workText.textContent = text;
+      this.workEl.classList.add('vg-notice-show');
+    }
+    // Keep the seconds counting even when the data source reports no progress.
+    clearTimeout(view.timer);
+    view.timer = setTimeout(() => this.#showWork(view), 1000);
+  }
+
+  #endView() {
+    const view = this.#work;
+    if (!view) return;
+    clearTimeout(view.timer);
+    view.ctrl.abort();
+    this.#work = null;
+    this.workEl?.classList.remove('vg-notice-show');
+  }
+
   /** A short message at the bottom of the grid (refused or failed sorts and filters). notices: false turns it off. */
   notify(text, isError = false) {
     if (this.o.notices === false || !this.host) return;
@@ -1356,7 +1474,7 @@ export class VirtualGrid {
    * Additive (Shift): add the key as the lowest priority, or cycle it in place (→ removed after descending).
    */
   toggleSort(key, additive = false) {
-    if (!this.o.sortable || !key) return Promise.resolve(false);
+    if (!this.#allowed('sortable', key)) return Promise.resolve(false);
     if (!this.o.multiSort) additive = false;
     const same = (k) => k.col === key.col && k.dim === key.dim;
     const i = this.sortSpec.findIndex((s) => same(s.key));
@@ -1515,6 +1633,7 @@ export class VirtualGrid {
   }
 
   destroy() {
+    this.#endView();
     for (const slot of this.rowSlots) for (const cell of slot.cells) if (cell.cleanup !== undefined) this.#runCleanup(cell);
     this.colSpans.destroy();
     this.rowSpans.destroy();
@@ -1594,7 +1713,7 @@ export class VirtualGrid {
       d.style.height = `${colTiers[t].height}px`;
       d.style.lineHeight = `${colTiers[t].height}px`;
       d.textContent = colTiers[t].name ?? '';
-      const tierKey = this.o.filterable ? model.colTierFilter?.(t) : null;
+      const tierKey = this.#allowed('filterable', model.colTierFilter?.(t)) ? model.colTierFilter(t) : null;
       if (tierKey) {
         d.classList.add('vg-filterable');
         const filterBtn = makeFilterButton();
@@ -1611,8 +1730,8 @@ export class VirtualGrid {
       d.style.height = `${colTiers[T - 1].height}px`;
       d.style.lineHeight = `${colTiers[T - 1].height}px`;
       d.textContent = band.name ?? '';
-      const key = this.o.sortable ? model.rowBandSort?.(b) : null;
-      const fkey = this.o.filterable ? model.rowBandFilter?.(b) : null;
+      const key = this.#allowed('sortable', model.rowBandSort?.(b)) ? model.rowBandSort(b) : null;
+      const fkey = this.#allowed('filterable', model.rowBandFilter?.(b)) ? model.rowBandFilter(b) : null;
       let filterBtn = null;
       if (fkey) {
         d.classList.add('vg-filterable');
@@ -1793,14 +1912,14 @@ export class VirtualGrid {
     }
     if (e.altKey && e.code === 'KeyF') {
       e.preventDefault();
-      const key = this.o.filterable ? this.model.colFilterKey?.(this.sel.active.c) : null;
-      if (key) this.openFilter(key);
+      const key = this.model.colFilterKey?.(this.sel.active.c);
+      if (this.#allowed('filterable', key)) this.openFilter(key);
       return;
     }
     if (e.altKey && e.code === 'KeyS') {
       e.preventDefault();
       const c = this.sel.active.c;
-      if (this.o.sortable) this.toggleSort(this.model.colSortKey ? this.model.colSortKey(c) : { col: this.colSource(c) }, shift);
+      this.toggleSort(this.model.colSortKey ? this.model.colSortKey(c) : { col: this.colSource(c) }, shift);
       return;
     }
     if (e.altKey) return;
@@ -1878,10 +1997,12 @@ export class VirtualGrid {
     const report = (info) => {
       const out = { ...base, ms: Math.round(performance.now() - started), ...info };
       this.o.onCopy?.(out);
+      // Built-in feedback (notices: false leaves it to onCopy).
+      this.notify(out.ok ? this.msg.copied(out) : out.reason, !out.ok && !out.retry);
       return out;
     };
     if (base.cells > MAX_COPY_CELLS) {
-      return Promise.resolve(report({ ok: false, reason: `Selection too large to copy: ${base.cells.toLocaleString('en-US')} cells (limit ${MAX_COPY_CELLS.toLocaleString('en-US')})` }));
+      return Promise.resolve(report({ ok: false, reason: this.msg.copyTooLarge(base.cells, MAX_COPY_CELLS) }));
     }
 
     const plans = ranges.map((g) => this.#planCopy(g));
@@ -1909,12 +2030,13 @@ export class VirtualGrid {
     if (missing.size === 0) {
       const out = this.#buildCopy(plans);
       const ok = writeClipboardNow(out.text, out.html);
-      return Promise.resolve(report(ok ? { ok: true, text: out.text } : { ok: false, reason: 'The browser refused clipboard access', text: out.text }));
+      return Promise.resolve(report(ok ? { ok: true, text: out.text } : { ok: false, reason: this.msg.copyRefused, text: out.text }));
     }
 
     // Some cells must be loaded first. Hand the clipboard a promise now, while the key press still
     // counts as a user action (Safari requires that; Chromium accepts it), and fill it when the data is in.
     let fetchedCells = 0;
+    this.notify(this.msg.copying(base.cells));
     const pending = this.#fetchForCopy(missing).then((n) => {
       fetchedCells = n;
       return this.#buildCopy(plans);
@@ -1937,7 +2059,7 @@ export class VirtualGrid {
         try {
           out = await pending;
         } catch (loadErr) {
-          return report({ ok: false, reason: `Could not load the cells: ${loadErr.message}` });
+          return report({ ok: false, reason: this.msg.copyLoadFailed(loadErr.message) });
         }
         // Fallback: plain text only (may still be refused once the key press is too long ago). The
         // values stay in the copy cache, so pressing the shortcut again copies instantly.
@@ -1945,7 +2067,7 @@ export class VirtualGrid {
           await navigator.clipboard.writeText(out.text);
           return report({ ok: true, text: out.text, fetched: fetchedCells, plainOnly: true });
         } catch {
-          return report({ ok: false, retry: true, fetched: fetchedCells, reason: `Loaded ${fetchedCells.toLocaleString('en-US')} cells; press ${this.isMac ? '⌘C' : 'Ctrl+C'} again to copy`, cause: String(err?.message ?? err) });
+          return report({ ok: false, retry: true, fetched: fetchedCells, reason: this.msg.copyAgain(fetchedCells, this.isMac ? '⌘C' : 'Ctrl+C'), cause: String(err?.message ?? err) });
         }
       },
     );
@@ -2614,11 +2736,11 @@ export class VirtualGrid {
     // Header items (single row/column segments) that intersect the selection are highlighted.
     const selRanges = this.sel.ranges;
     const colSegs = model.colSegments(c0, c1, label);
-    const { sortable, filterable, resizable, expandable } = this.o;
+    const { resizable, expandable } = this.o;
     const noSel = this.o.selection === 'none';
     for (const s of colSegs) {
-      if (!sortable) s.sort = undefined;
-      if (!filterable) s.filter = undefined;
+      if (s.sort && !this.#allowed('sortable', s.sort)) s.sort = undefined;
+      if (s.filter && !this.#allowed('filterable', s.filter)) s.filter = undefined;
       if (!resizable) s.resizable = false;
       if (!expandable) s.toggle = undefined;
       s.selected = !noSel && s.a === s.b && selRanges.some((g) => g.c0 <= s.b && g.c1 >= s.a);

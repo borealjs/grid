@@ -422,3 +422,20 @@
 }
 .vg-notice-show { opacity: 1; transform: translate(-50%, 0); }
 .vg-notice-error { background: var(--vg-error-bg); color: #fff; }
+
+/* A sort or filter that takes a while: what it is doing, and a way to stop it */
+.vg-work { display: flex; align-items: center; gap: 12px; }
+.vg-work button,
+.vg-filter-cancel {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.vg-work button {
+  padding: 2px 10px;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+}
+.vg-filter-cancel { margin-right: auto; }
+.vg-filter-cancel[hidden] { display: none; }

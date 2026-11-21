@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { VirtualGrid, Column, createHttpSource, useDataSource } from '@borealjs/react-grid';
 import { EMPTY_QUERY } from '@borealjs/grid-core';
 import { inBrowserFetch } from './inBrowserApi.js';
+import { OptionsPanel, useGridOptions, gridPropsOf, cssVarsOf } from './OptionsPanel.jsx';
 
 // The static build (npm run build:pages, GitHub Pages) has no server: the server tabs then run the
 // reference backend's code in the browser behind a fake fetch. Otherwise they call npm start through /api.
@@ -17,29 +18,34 @@ const TABS = [
 
 export default function App() {
   const [tab, setTab] = useState('memory');
-  const [theme, setTheme] = useState('auto');
+  const options = useGridOptions();
+  const [panel, setPanel] = useState(() => window.matchMedia?.('(min-width: 1100px)').matches ?? true);
+  const grid = gridPropsOf(options.values);
+  const cssVars = cssVarsOf(options.values);
   return (
-    <div className={`app app-${theme}`}>
+    <div className={`app app-${options.values.theme}`}>
+      {cssVars && <style>{`.app .vg {\n${cssVars}\n}`}</style>}
       <header className="bar">
         <strong>BorealJS Grid</strong>
-        {IN_BROWSER && <a className="muted" href="https://github.com/borealjs/grid">GitHub</a>}
         <nav className="tabs" role="tablist">
           {TABS.map((t) => (
             <button key={t.id} role="tab" aria-selected={tab === t.id} className={tab === t.id ? 'on' : ''} onClick={() => setTab(t.id)}>{t.label}</button>
           ))}
         </nav>
-        <label className="field">Theme
-          <select value={theme} onChange={(e) => setTheme(e.target.value)}>
-            <option value="auto">Auto</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
+        <nav className="links">
+          <a href="https://github.com/borealjs/grid/tree/main/examples/vanilla">Plain JavaScript example</a>
+          <a href="https://github.com/borealjs/grid/blob/main/examples/react/src/App.jsx">Source</a>
+          <a href="https://github.com/borealjs/grid#readme">Docs</a>
+        </nav>
+        <button type="button" className={panel ? 'on' : ''} aria-expanded={panel} onClick={() => setPanel(!panel)}>Options</button>
       </header>
-      {tab === 'memory' && <InMemoryDemo theme={theme} />}
-      {tab === 'custom' && <CustomBackendDemo theme={theme} />}
-      {tab === 'pivot' && <PivotDemo theme={theme} />}
-      {tab === 'huge' && <HugeTableDemo theme={theme} />}
+      <div className="main">
+        {tab === 'memory' && <InMemoryDemo grid={grid} />}
+        {tab === 'custom' && <CustomBackendDemo grid={grid} />}
+        {tab === 'pivot' && <PivotDemo grid={grid} />}
+        {tab === 'huge' && <HugeTableDemo grid={grid} />}
+        {panel && <OptionsPanel options={options} onClose={() => setPanel(false)} />}
+      </div>
     </div>
   );
 }
@@ -115,7 +121,7 @@ const TITLES = { id: 'ID', name: 'Customer', status: 'Status', progress: 'Progre
 const describeSort = (sort) => sort.map((s) => `${TITLES[s.key] ?? s.key} ${s.direction === 'desc' ? '▼' : '▲'}`).join(', ');
 const describeFilter = (filter) => filter.map((f) => `${TITLES[f.key] ?? f.key} ${f.op}${f.values ? ` ${f.values.join(', ')}` : f.text ? ` "${f.text}"` : f.value !== undefined ? ` ${f.value}` : ''}`).join('; ');
 
-function InMemoryDemo({ theme }) {
+function InMemoryDemo({ grid: gridProps }) {
   const [count, setCount] = useState(200_000);
   const [seed, setSeed] = useState(1);
   // Plain React state: a new array updates the grid in place (scroll, sort and filter stay).
@@ -123,7 +129,6 @@ function InMemoryDemo({ theme }) {
   const [sort, setSort] = useState([{ key: 'amount', direction: 'desc' }]); // controlled
   const [filter, setFilter] = useState([]); // controlled
   const [highlight, setHighlight] = useState('');
-  const [features, setFeatures] = useState({ sortable: true, filterable: true, multi: true });
   const [selection, setSelection] = useState(null);
   const grid = useRef(null);
 
@@ -137,9 +142,6 @@ function InMemoryDemo({ theme }) {
         </label>
         <button type="button" onClick={() => { const s = seed + 1; setSeed(s); setRows(makeRows(count, s)); }}>New data</button>
         <label className="field">Highlight <input value={highlight} onChange={(e) => setHighlight(e.target.value)} placeholder="name contains…" /></label>
-        <label className="check"><input type="checkbox" checked={features.sortable} onChange={(e) => setFeatures({ ...features, sortable: e.target.checked })} /> Sorting</label>
-        <label className="check"><input type="checkbox" checked={features.filterable} onChange={(e) => setFeatures({ ...features, filterable: e.target.checked })} /> Filters</label>
-        <label className="check"><input type="checkbox" checked={features.multi} onChange={(e) => setFeatures({ ...features, multi: e.target.checked })} /> Range selection</label>
         <button type="button" onClick={() => setSort([])} disabled={!sort.length}>Clear sort</button>
         <button type="button" onClick={() => setFilter([])} disabled={!filter.length}>Clear filters</button>
       </div>
@@ -149,10 +151,7 @@ function InMemoryDemo({ theme }) {
         className="grid"
         aria-label="Customers"
         rows={rows}
-        theme={theme}
-        sortable={features.sortable}
-        filterable={features.filterable}
-        selection={features.multi ? 'multi' : 'single'}
+        {...gridProps}
         sort={sort}
         onSortChange={setSort}
         filter={filter}
@@ -237,7 +236,7 @@ const fakeApi = (() => {
   };
 })();
 
-function CustomBackendDemo({ theme }) {
+function CustomBackendDemo({ grid: gridProps }) {
   const [term, setTerm] = useState('');
   // Callbacks may use props and state; when `term` changes the grid reloads in place.
   const source = useDataSource({
@@ -258,7 +257,7 @@ function CustomBackendDemo({ theme }) {
         className="grid"
         aria-label="Orders"
         dataSource={source}
-        theme={theme}
+        {...gridProps}
         filterable={false}
         sortable={false}
         emptyState="No products match."
@@ -272,15 +271,149 @@ function CustomBackendDemo({ theme }) {
   );
 }
 
+// ------------------------------------------------------------------ server tabs: controls and stats
+
+const fmt = (n) => Number(n).toLocaleString('en-US');
+const parseCount = (text) => Number(String(text).replace(/[,_\s]/g, ''));
+const LATENCIES = [0, 40, 150, 500, 1000];
+
+/**
+ * Size and latency of the demo backend's data (applied with Load, so typing doesn't reload), plus
+ * "go to row / column". `fields` lists the size inputs: [{ name, label, value }].
+ */
+function ServerToolbar({ fields, latency, onLoad, grid, children }) {
+  const [draft, setDraft] = useState(() => Object.fromEntries(fields.map((f) => [f.name, fmt(f.value)])));
+  const [lat, setLat] = useState(latency);
+  const [goto, setGoto] = useState({ row: '', col: '' });
+  const load = (e) => {
+    e.preventDefault();
+    const next = {};
+    for (const f of fields) {
+      const n = parseCount(draft[f.name]);
+      if (Number.isSafeInteger(n) && n >= (f.min ?? 0) && n <= f.max) next[f.name] = n;
+    }
+    onLoad({ ...next, latency: lat });
+  };
+  const go = (e) => {
+    e.preventDefault();
+    const row = parseCount(goto.row || '1');
+    const col = parseCount(goto.col || '1');
+    if (!Number.isFinite(row) || !Number.isFinite(col)) return;
+    grid.current?.scrollToCell(Math.max(0, row - 1), Math.max(0, col - 1));
+    grid.current?.focus();
+  };
+  return (
+    <div className="controls">
+      <form className="seg" onSubmit={load}>
+        {fields.map((f) => (
+          <label key={f.name} className="field" title={f.title}>{f.label}
+            <input value={draft[f.name]} onChange={(e) => setDraft({ ...draft, [f.name]: e.target.value })} inputMode="numeric" size={f.size ?? 13} />
+          </label>
+        ))}
+        <label className="field">Latency
+          <select value={lat} onChange={(e) => setLat(Number(e.target.value))}>
+            {LATENCIES.map((ms) => <option key={ms} value={ms}>{ms} ms</option>)}
+          </select>
+        </label>
+        <button type="submit">Load</button>
+      </form>
+      <form className="seg" onSubmit={go}>
+        <label className="field">Row <input value={goto.row} onChange={(e) => setGoto({ ...goto, row: e.target.value })} inputMode="numeric" size={13} placeholder="734,000,123" /></label>
+        <label className="field">Col <input value={goto.col} onChange={(e) => setGoto({ ...goto, col: e.target.value })} inputMode="numeric" size={7} placeholder="1" /></label>
+        <button type="submit">Go</button>
+      </form>
+      {children}
+    </div>
+  );
+}
+
+/** Timing of the last sort or filter: "Filtered to 83,333,333 rows in 24.1 s". */
+function useViewTiming() {
+  const started = useRef(0);
+  const [last, setLast] = useState(null);
+  const onViewChange = (info) => {
+    if (info.pending) {
+      if (!info.progress) started.current = performance.now();
+      return;
+    }
+    const seconds = (performance.now() - started.current) / 1000;
+    const verb = info.what === 'sort' ? 'Sorted' : info.what === 'columns' ? 'Columns updated' : 'Filtered';
+    if (info.cancelled) setLast(`${info.what === 'sort' ? 'Sort' : 'Filter'} cancelled after ${seconds.toFixed(1)} s`);
+    else if (info.ok) setLast(`${verb}${info.what === 'filter' ? ` to ${fmt(info.rows)} rows` : ''} in ${seconds < 1 ? `${Math.round(seconds * 1000)} ms` : `${seconds.toFixed(1)} s`}`);
+  };
+  return [last, onViewChange];
+}
+
+/** What the grid is doing, refreshed four times a second: rows and columns on screen, render time, requests. */
+function StatsBar({ grid, timing }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 250);
+    return () => clearInterval(t);
+  }, []);
+  const g = grid.current;
+  const s = g?.stats();
+  const v = g?.visibleRange;
+  if (!g || !s || !v) return <footer className="status">Loading…</footer>;
+  const q = g.getQuery();
+  const parts = [
+    `Rows ${fmt(v.firstRow + 1)}–${fmt(v.lastRow + 1)} of ${fmt(g.rowCount)}`,
+    `Cols ${fmt(v.firstCol + 1)}–${fmt(v.lastCol + 1)} of ${fmt(g.columnCount)}`,
+    `render ${s.renderMsEma.toFixed(1)} ms avg, ${s.renderMsMax.toFixed(1)} max`,
+    `${fmt(s.cache.requests)} ${s.cache.requests === 1 ? 'request' : 'requests'} (${fmt(s.cache.gatherRequests)} batched, ${fmt(s.cache.aborted)} cancelled)`,
+    `${fmt(s.cache.cellsFetched)} cells loaded`,
+    `${s.cache.inflight} loading`,
+  ];
+  if (s.cache.lastMs) parts.push(`last response ${Math.round(s.cache.lastMs)} ms`);
+  if (q.filter.length || q.sort.length) parts.unshift(`${q.sort.length} sort · ${q.filter.length} filter`);
+  if (timing) parts.unshift(timing);
+  return <footer className="status" aria-live="off">{parts.join('  ·  ')}</footer>;
+}
+
 // ------------------------------------------------------------------ server pivot
 
-function PivotDemo({ theme }) {
-  const source = useMemo(() => serverSource({ mode: 'pivot', rows: 50_000, years: 10, latency: 40 }), []);
+// Merged cells set from code (grid.setMerges). Positions are in the fully expanded pivot, worked out from
+// its row and column trees (low-level grid internals, fine for a demo), so they cross group boundaries:
+// collapse the city or quarter a merge crosses and it splits into a piece on each side.
+function pivotDemoMerges(model) {
+  const rt = model.rows;
+  const ct = model.cols.base;
+  const cityStart = (g) => rt.fullItemStart[2][g];
+  const citySubtotal = (g) => rt.fullItemStart[2][g] + rt.fullItems[2][g] - 1;
+  const monthStart = (q) => ct.fullItemStart[2][q];
+  const quarterTotal = (q) => ct.fullItemStart[2][q] + ct.fullItems[2][q] - 1;
+  const r = cityStart(0);
+  const acrossCityTop = citySubtotal(0) - 1;
+  const acrossCityBottom = cityStart(2) + 1;
+  return [
+    { r0: r + 1, c0: monthStart(0), nr: 1, nc: 3 },
+    { r0: r + 3, c0: monthStart(1), nr: 4, nc: 3 },
+    { r0: r + 8, c0: quarterTotal(0), nr: 2, nc: quarterTotal(1) - quarterTotal(0) + 2, label: 'Q1 total → Jul (collapse Q2 to split)' },
+    { r0: acrossCityTop, c0: monthStart(0), nr: acrossCityBottom - acrossCityTop + 1, nc: 2, label: 'Spans a whole city (collapse it to split)' },
+  ];
+}
+
+function showMerges(grid, where) {
+  const model = grid.engine.model;
+  grid.setMerges(pivotDemoMerges(model));
+  const row = where === 'edge' ? model.rows.fromSource(model.rows.fullItemStart[2][0] + model.rows.fullItems[2][0] - 4, true) : 0;
+  grid.scrollToCell(row, 0);
+}
+
+function PivotDemo({ grid: gridProps }) {
+  const [params, setParams] = useState({ rows: 50_000, years: 10, latency: 40 });
+  const source = useMemo(() => serverSource({ mode: 'pivot', ...params }), [params]);
   const grid = useRef(null);
   const [levels, setLevels] = useState(null);
+  const [timing, onViewChange] = useViewTiming();
   return (
     <section className="demo">
-      <div className="controls">
+      <ServerToolbar
+        grid={grid}
+        latency={params.latency}
+        onLoad={setParams}
+        fields={[{ name: 'rows', label: 'Products', value: params.rows, max: 1e9 }, { name: 'years', label: 'Years of columns', title: 'Each year adds 68 columns: 4 measures × (12 months + 4 quarter totals + a year total)', value: params.years, min: 1, max: 20_000, size: 6 }]}
+      >
         {levels && ['rows', 'cols'].map((axis) => (
           <span key={axis} className="seg">
             <span className="muted">{axis === 'rows' ? 'Rows' : 'Cols'}</span>
@@ -288,34 +421,48 @@ function PivotDemo({ theme }) {
             <button type="button" onClick={() => grid.current.expandAll(axis)}>All</button>
           </span>
         ))}
-      </div>
+        {levels && (
+          <span className="seg">
+            <span className="muted">Merged cells</span>
+            <button type="button" onClick={() => showMerges(grid.current, 'top')}>Show</button>
+            <button type="button" onClick={() => showMerges(grid.current, 'edge')}>Across a city</button>
+            <button type="button" onClick={() => grid.current.setMerges([])}>Clear</button>
+          </span>
+        )}
+      </ServerToolbar>
       <VirtualGrid
+        key={JSON.stringify(params)}
         ref={grid}
         className="grid"
         aria-label="Sales pivot"
         dataSource={source}
-        theme={theme}
+        {...gridProps}
         onReady={(g) => setLevels(g.levels)}
+        onViewChange={onViewChange}
         cellClass={(value) => (typeof value === 'string' && value.startsWith('-') ? 'neg' : '')}
       />
+      <StatsBar grid={grid} timing={timing} />
     </section>
   );
 }
 
 // ------------------------------------------------------------------ server table, a billion rows
 
-// The row limits are this demo backend's (it scans rows, with no index), not the grid's.
-const fmtRows = (n) => n.toLocaleString();
+// Sorting by several columns is limited by this demo backend (it sorts in memory), not by the grid.
 const DEMO_LIMITS = {
-  filterLimit: (limit, total) => `This demo's backend filters up to ${fmtRows(limit)} rows by scanning them, and this table has ${fmtRows(total)}. A backend with database indexes can filter tables of any size. The other tabs show filtering.`,
-  sortLimit: (limit, total) => `This demo's backend sorts by several columns up to ${fmtRows(limit)} rows, and this table has ${fmtRows(total)}. A backend with database indexes can do it at any size.`,
+  sortLimit: (limit, total) => `This demo's backend sorts by several columns up to ${fmt(limit)} rows (it sorts in memory), and this table has ${fmt(total)}. A backend with database indexes can do it at any size. Sort by one column, or load fewer rows.`,
+  filterLimit: (limit, total) => `This demo's backend filters up to ${fmt(limit)} rows, and this table has ${fmt(total)}. Load fewer rows to filter.`,
 };
 
-function HugeTableDemo({ theme }) {
-  const source = useMemo(() => serverSource({ mode: 'flat', rows: 1_000_000_000, cols: 1_000_000, latency: 40 }), []);
+function HugeTableDemo({ grid: gridProps }) {
+  const [params, setParams] = useState({ rows: 1_000_000_000, cols: 1_000_000, latency: 40 });
+  const source = useMemo(() => serverSource({ mode: 'flat', ...params }), [params]);
+  const grid = useRef(null);
   const [layout, setLayout] = useState(null);
   const [error, setError] = useState(null);
+  const [timing, onViewChange] = useViewTiming();
   useEffect(() => {
+    setLayout(null);
     source.getLayout({ query: EMPTY_QUERY }).then(setLayout, setError);
   }, [source]);
   // A million columns are described by index; titles come from the server (getLabels).
@@ -329,21 +476,34 @@ function HugeTableDemo({ theme }) {
     };
   }, [layout]);
   if (error) return <p className="note">{IN_BROWSER ? 'Could not load the table' : 'Start the reference server first (npm start, port 5174)'}: {error.message}</p>;
-  if (!layout) return <p className="note">Loading…</p>;
   return (
     <section className="demo">
-      <VirtualGrid
-        className="grid"
-        aria-label="A billion rows"
-        dataSource={source}
-        layout={layout}
-        columnCount={layout.columnCount}
-        getColumn={getColumn}
-        columnChooser
-        columnGroups={layout.meta.columnTypes}
-        messages={DEMO_LIMITS}
-        theme={theme}
-      />
+      <ServerToolbar
+        grid={grid}
+        latency={params.latency}
+        onLoad={setParams}
+        fields={[{ name: 'rows', label: 'Rows', value: params.rows, max: 1e14 }, { name: 'cols', label: 'Columns', value: params.cols, max: 1e12, size: 11 }]}
+      >
+        <span className="muted">Filtering a billion rows scans them all here (about half a minute); the grid shows progress and lets you cancel.</span>
+      </ServerToolbar>
+      {layout ? (
+        <VirtualGrid
+          key={JSON.stringify(params)}
+          ref={grid}
+          className="grid"
+          aria-label="A billion rows"
+          dataSource={source}
+          layout={layout}
+          columnCount={layout.columnCount}
+          getColumn={getColumn}
+          columnChooser
+          columnGroups={layout.meta.columnTypes}
+          onViewChange={onViewChange}
+          {...gridProps}
+          messages={{ ...DEMO_LIMITS, ...gridProps.messages }}
+        />
+      ) : <p className="note grid">Loading…</p>}
+      <StatsBar grid={grid} timing={timing} />
     </section>
   );
 }

@@ -40,9 +40,14 @@
 // dimensions (Measure, Year, Quarter, Month). Column indexes — in requests and in sort keys — are then
 // positions among the remaining columns, and column totals are recomputed over what is left.
 // (Flat mode ignores colfilter: the client hides columns itself and addresses the source columns.)
-//   - flat: the server scans the table once per filter (cached), up to FILTER_MAX_ROWS rows
+//   - flat: the server scans the table once per filter (cached), up to FILTER_MAX_ROWS rows; long scans
+//     report how far they are at GET /api/progress (same parameters as /api/meta), and stop when every
+//     request waiting for them is cancelled
 //   - pivot: filtered-out groups disappear and every total is recomputed over what is left
 //     ("visual totals"); filtering products by name scans products, up to PIVOT_LEAF_FILTER_MAX
+//
+//   GET /api/progress?…same as /api/meta  -> { active, phase, done, total, ms } of the sort or scan that
+//       request is waiting for (active: false when none is running)
 //
 // Every /api call accepts `latency` (ms) to simulate a slow network or database.
 // Data is procedural (same value for the same cell every time), so any size works without storage.
@@ -64,16 +69,32 @@ const MAX_GATHER_RECTS = 500;
 const DEFAULT_LATENCY = 40;
 const MAX_SORT_KEYS = 4;
 const MULTI_SORT_MAX_ROWS = 5_000_000;
-const FILTER_MAX_ROWS = 5_000_000;
+// Filters on up to EXACT_FILTER_ROWS rows keep a list of the matching rows. Larger tables (up to
+// FILTER_MAX_ROWS) are scanned once to count matches per chunk of rows; a chunk's rows are found again
+// when a request needs them. That takes seconds per billion rows, reported through /api/progress.
+const EXACT_FILTER_ROWS = 5_000_000;
+const FILTER_MAX_ROWS = 2_000_000_000;
+const FILTER_CHUNK = 65_536;
 const PIVOT_LEAF_FILTER_MAX = 5_000_000;
 const MAX_FILTERS = 16;
 
 const fmtCount = (n) => n.toLocaleString('en-US');
 const httpError = (message, status = 400) => Object.assign(new Error(message), { status });
 // Lets other work run during long scans (other requests on the server, rendering in the browser).
+// In the browser a MessageChannel message is used: setTimeout(0) waits at least 4 ms once nested.
 const yieldToEventLoop = typeof setImmediate === 'function'
   ? () => new Promise((resolve) => setImmediate(resolve))
-  : () => new Promise((resolve) => setTimeout(resolve, 0));
+  : typeof MessageChannel === 'function'
+    ? (() => {
+      const channel = new MessageChannel();
+      const queue = [];
+      channel.port1.onmessage = () => queue.shift()?.();
+      return () => new Promise((resolve) => {
+        queue.push(resolve);
+        channel.port2.postMessage(0);
+      });
+    })()
+    : () => new Promise((resolve) => setTimeout(resolve, 0));
 
 // ------------------------------------------------------------------ hashing
 
@@ -100,26 +121,38 @@ function feistel(n, key) {
   const h = Math.ceil(bits / 2);
   const half = 2 ** h;
   const mask = half - 1;
-  const keys = [mix(key, 0x51ed270b), mix(key, 0x2f1a8c33), mix(key, 0x7c3d9a61), mix(key, 0x1b873593)];
+  // Round function: mix(R, key) & mask with the key's share precomputed (R < 2^32 always here), so a
+  // scan over a billion rows spends its time on the data, not on the hash. Same values as mix().
+  const HI0 = Math.imul(0x632be5ab, 0xc2b2ae35);
+  const [m0, m1, m2, m3] = [0x51ed270b, 0x2f1a8c33, 0x7c3d9a61, 0x1b873593].map((salt) => Math.imul(mix(key, salt) ^ 0x27d4eb2f, 0x165667b1) ^ HI0);
+  const F = (R, m) => {
+    let x = Math.imul(R ^ 0x9e3779b9, 0x85ebca6b) ^ m;
+    x ^= x >>> 16;
+    x = Math.imul(x, 0x85ebca6b);
+    x ^= x >>> 13;
+    x = Math.imul(x, 0xc2b2ae35);
+    x ^= x >>> 16;
+    return x & mask;
+  };
+  // Up to 2^30 (h <= 15) everything stays in 31-bit integers; larger domains split with float math.
+  const small = h <= 15;
   const once = (x) => {
-    let L = Math.floor(x / half);
-    let R = x - L * half;
-    for (let i = 0; i < 4; i++) {
-      const t = (L ^ (mix(R, keys[i]) & mask)) & mask;
-      L = R;
-      R = t;
-    }
-    return L * half + R;
+    let L = small ? x >>> h : Math.floor(x / half);
+    let R = small ? x & mask : x - L * half;
+    let t = L ^ F(R, m0); L = R; R = t;
+    t = L ^ F(R, m1); L = R; R = t;
+    t = L ^ F(R, m2); L = R; R = t;
+    t = L ^ F(R, m3); L = R; R = t;
+    return small ? (L << h) + R : L * half + R;
   };
   const onceInverse = (y) => {
-    let L = Math.floor(y / half);
-    let R = y - L * half;
-    for (let i = 3; i >= 0; i--) {
-      const t = (R ^ (mix(L, keys[i]) & mask)) & mask;
-      R = L;
-      L = t;
-    }
-    return L * half + R;
+    let L = small ? y >>> h : Math.floor(y / half);
+    let R = small ? y & mask : y - L * half;
+    let t = R ^ F(L, m3); R = L; L = t;
+    t = R ^ F(L, m2); R = L; L = t;
+    t = R ^ F(L, m1); R = L; L = t;
+    t = R ^ F(L, m0); R = L; L = t;
+    return small ? (L << h) + R : L * half + R;
   };
   return {
     enc(x) {
@@ -294,47 +327,156 @@ const flat = (() => {
 
   const views = new Map(); // "n|sort|filter" -> Promise<{ count, rowAt }>
   const scans = new Map(); // "n|filter" -> Promise<Uint32Array> (matching rows, in row order)
+  const jobs = new Map(); // "n|sort|filter" -> the sort or scan building that view, while it runs
 
-  /**
-   * Maps a position in the (filtered, sorted) view to a data row: { count, rowAt(p) }.
-   * Throws a 422 error when the request needs a scan or a multi-column sort larger than the demo allows.
-   */
-  async function view(n, keys, filters = []) {
+  /** Sort keys that matter: a key whose values are all different decides the order on its own. */
+  function effectiveKeys(n, keys) {
     const effective = [];
     for (const k of keys) {
       effective.push(k);
       if (allDistinct(n, k.col)) break;
     }
-    if (filters.length === 0) {
-      if (effective.length === 0) return { count: n, rowAt: (p) => p };
-      if (effective.length === 1) {
-        const { col, desc } = effective[0];
-        if (col % 8 === 0) return { count: n, rowAt: (p) => (desc ? n - 1 - p : p) };
-        const f = perm(n, col);
-        return { count: n, rowAt: (p) => f.dec(desc ? n - 1 - p : p) };
-      }
-      if (n > MULTI_SORT_MAX_ROWS) {
-        throw httpError(`Sorting by several columns is limited to ${fmtCount(MULTI_SORT_MAX_ROWS)} rows in this demo server (this table has ${fmtCount(n)})`, 422);
-      }
-    } else if (n > FILTER_MAX_ROWS) {
+    return effective;
+  }
+  const viewKey = (n, effective, filters) => `${n}|${sortSignature(effective)}|${filterSignature(filters)}`;
+
+  /**
+   * Long work behind a view: how far it is (for /api/progress), and a stop once every request waiting
+   * for it has been cancelled. tick() lets other work run and throws when the work is no longer wanted.
+   */
+  function startJob(key) {
+    const job = {
+      phase: '',
+      done: 0,
+      total: 0,
+      started: Date.now(),
+      waiters: new Set(),
+      step(phase, total) {
+        job.phase = phase;
+        job.total = total;
+        job.done = 0;
+      },
+      async tick(done) {
+        job.done = done;
+        await yieldToEventLoop();
+        if (job.waiters.size && [...job.waiters].every((gaveUp) => gaveUp())) throw httpError('cancelled', 499);
+      },
+    };
+    jobs.set(key, job);
+    return job;
+  }
+
+  /** How far the work for this view is: { active, phase, done, total, ms }. */
+  function progress(n, keys, filters) {
+    const job = jobs.get(viewKey(n, effectiveKeys(n, keys), filters));
+    if (!job) return { active: false };
+    return { active: true, phase: job.phase, done: job.done, total: job.total, ms: Date.now() - job.started };
+  }
+
+  /**
+   * Maps a position in the (filtered, sorted) view to a data row: { count, rowAt(p) }.
+   * Throws a 422 error when the request needs a scan or a multi-column sort larger than the demo allows.
+   * `cancelled()` says whether the caller gave up; work nobody waits for any more is stopped.
+   */
+  async function view(n, keys, filters = [], cancelled = () => false) {
+    const effective = effectiveKeys(n, keys);
+    if (effective.length > 1 && n > MULTI_SORT_MAX_ROWS) {
+      throw httpError(`Sorting by several columns is limited to ${fmtCount(MULTI_SORT_MAX_ROWS)} rows in this demo server (this table has ${fmtCount(n)})`, 422);
+    }
+    if (filters.length && n > FILTER_MAX_ROWS) {
       throw httpError(`Filtering is limited to ${fmtCount(FILTER_MAX_ROWS)} rows in this demo server (this table has ${fmtCount(n)})`, 422);
     }
-    const key = `${n}|${sortSignature(effective)}|${filterSignature(filters)}`;
+    if (filters.length === 0 && effective.length <= 1) return { count: n, rowAt: baseOrder(n, effective[0]) };
+    // Check the conditions before any long work starts.
+    const tests = filters.map((cond) => compile(n, cond));
+    const key = viewKey(n, effective, filters);
     let pending = views.get(key);
     if (!pending) {
+      const job = startJob(key);
       pending = (async () => {
         if (filters.length === 0) {
-          const order = await buildOrder(n, effective);
+          const order = await buildOrder(n, effective, job);
           return { count: n, rowAt: (p) => order[p] };
         }
-        const matches = await scan(n, filters);
-        const order = effective.length ? await sortRows(n, matches, effective) : matches;
+        if (n > EXACT_FILTER_ROWS) return chunkedView(n, effective[0], tests, job);
+        const matches = await scan(n, filters, tests, job);
+        const order = effective.length ? await sortRows(n, matches, effective, job) : matches;
         return { count: order.length, rowAt: (p) => order[p] };
       })();
       pending.catch(() => views.delete(key));
+      pending.then(() => jobs.delete(key), () => jobs.delete(key));
       lruSet(views, key, pending, 6);
     }
-    return pending;
+    const job = jobs.get(key);
+    job?.waiters.add(cancelled);
+    try {
+      return await pending;
+    } finally {
+      job?.waiters.delete(cancelled);
+    }
+  }
+
+  /** Row at position p with at most one sort key and no filter: instant, via the column's bijection. */
+  function baseOrder(n, sortKey) {
+    if (!sortKey) return (p) => p;
+    const { col, desc } = sortKey;
+    if (col % 8 === 0) return desc ? (p) => n - 1 - p : (p) => p;
+    const f = perm(n, col);
+    return desc ? (p) => f.dec(n - 1 - p) : (p) => f.dec(p);
+  }
+
+  /**
+   * A filtered view of a big table (at most one sort key): one pass counts the matching rows in each
+   * chunk of FILTER_CHUNK positions; a chunk's matching rows are listed again when a request needs them.
+   */
+  async function chunkedView(n, sortKey, tests, job) {
+    const base = baseOrder(n, sortKey);
+    const matches = (r) => {
+      for (const test of tests) if (!test(r)) return false;
+      return true;
+    };
+    const chunks = Math.ceil(n / FILTER_CHUNK);
+    const before = new Float64Array(chunks + 1); // matching rows before each chunk
+    job.step('Checking rows', n);
+    let lastYield = Date.now();
+    for (let k = 0; k < chunks; k++) {
+      const end = Math.min(n, (k + 1) * FILTER_CHUNK);
+      let count = 0;
+      for (let p = k * FILTER_CHUNK; p < end; p++) if (matches(base(p))) count++;
+      before[k + 1] = before[k] + count;
+      if (Date.now() - lastYield > 12) {
+        await job.tick(end);
+        lastYield = Date.now();
+      }
+    }
+    const lists = new Map(); // chunk -> its matching rows, in view order (a few recent chunks)
+    const listOf = (k) => {
+      let list = lists.get(k);
+      if (!list) {
+        list = new Float64Array(before[k + 1] - before[k]);
+        let i = 0;
+        const end = Math.min(n, (k + 1) * FILTER_CHUNK);
+        for (let p = k * FILTER_CHUNK; p < end; p++) {
+          const r = base(p);
+          if (matches(r)) list[i++] = r;
+        }
+        lruSet(lists, k, list, 64);
+      }
+      return list;
+    };
+    return {
+      count: before[chunks],
+      rowAt(p) {
+        let lo = 0;
+        let hi = chunks - 1;
+        while (lo < hi) { // the chunk holding the p-th match: before[k] <= p < before[k + 1]
+          const mid = (lo + hi + 1) >> 1;
+          if (before[mid] <= p) lo = mid;
+          else hi = mid - 1;
+        }
+        return listOf(lo)[p - before[lo]];
+      },
+    };
   }
 
   /** A row test for one condition. Value columns test the value index, mostly via a lookup table. */
@@ -380,12 +522,12 @@ const flat = (() => {
   }
 
   /** Rows matching every condition, in row order (cached per filter, so a new sort does not rescan). */
-  function scan(n, filters) {
+  function scan(n, filters, tests, job) {
     const key = `${n}|${filterSignature(filters)}`;
     let pending = scans.get(key);
     if (!pending) {
       pending = (async () => {
-        const tests = filters.map((cond) => compile(n, cond));
+        job.step('Checking rows', n);
         const out = new Uint32Array(n);
         let m = 0;
         for (let r = 0; r < n; r++) {
@@ -397,7 +539,7 @@ const flat = (() => {
             }
           }
           if (ok) out[m++] = r;
-          if ((r & 262143) === 0) await yieldToEventLoop();
+          if ((r & 262143) === 0) await job.tick(r);
         }
         return out.slice(0, m);
       })();
@@ -411,11 +553,12 @@ const flat = (() => {
    * Sorts a subset of rows (given in row order, the final tie-break) by the keys: stable counting sorts
    * from the lowest-priority key to the highest. A key whose values are all distinct sorts by rank.
    */
-  async function sortRows(n, rows, keys) {
+  async function sortRows(n, rows, keys, job) {
     const m = rows.length;
     let order = rows.slice();
     let next = new Uint32Array(m);
     const values = new Uint32Array(m);
+    job.step('Sorting matching rows', keys.length * m);
     for (let ki = keys.length - 1; ki >= 0; ki--) {
       const { col, desc } = keys[ki];
       const t = col % 8;
@@ -426,7 +569,7 @@ const flat = (() => {
         const r = order[i];
         const v = t === 0 ? r : unique ? f.enc(r) : TYPES[t].bucket(f.enc(r) / n);
         values[i] = desc ? D - 1 - v : v;
-        if ((i & 262143) === 0) await yieldToEventLoop();
+        if ((i & 262143) === 0) await job.tick((keys.length - 1 - ki) * m + i);
       }
       const start = new Uint32Array(D + 1);
       for (let i = 0; i < m; i++) start[values[i] + 1]++;
@@ -442,19 +585,21 @@ const flat = (() => {
    * priority to the highest, a stable counting sort by that key's value index. A key whose values are
    * all distinct (only ever the last effective key) sets the whole order directly via π⁻¹.
    */
-  async function buildOrder(n, keys) {
+  async function buildOrder(n, keys, job) {
     let order = new Uint32Array(n);
     let next = new Uint32Array(n);
     for (let i = 0; i < n; i++) order[i] = i;
     const STEP = 1 << 18;
+    job.step('Sorting rows', keys.length * n);
     for (let ki = keys.length - 1; ki >= 0; ki--) {
+      const doneBefore = (keys.length - 1 - ki) * n;
       const { col, desc } = keys[ki];
       if (allDistinct(n, col)) {
         const f = col % 8 === 0 ? null : perm(n, col);
         for (let p = 0; p < n; p++) {
           const q = desc ? n - 1 - p : p;
           order[p] = f ? f.dec(q) : q;
-          if ((p & (STEP - 1)) === 0) await yieldToEventLoop();
+          if ((p & (STEP - 1)) === 0) await job.tick(doneBefore + p);
         }
         continue;
       }
@@ -464,7 +609,7 @@ const flat = (() => {
       for (let r = 0; r < n; r++) {
         const b = T.bucket(f.enc(r) / n);
         bucket[r] = desc ? T.D - 1 - b : b;
-        if ((r & (STEP - 1)) === 0) await yieldToEventLoop();
+        if ((r & (STEP - 1)) === 0) await job.tick(doneBefore + r);
       }
       const start = new Float64Array(T.D + 1);
       for (let r = 0; r < n; r++) start[bucket[r] + 1]++;
@@ -525,6 +670,7 @@ const flat = (() => {
 
   return {
     view,
+    progress,
     merges,
     meta: (rows, cols, matching = rows) => ({
       mode: 'flat',
@@ -1204,10 +1350,16 @@ export async function handleApiRequest({ url, method = 'GET', readBody = async (
   const filters = parseFilter(p.get('filter') ?? '', shape);
   const transformed = keys.length > 0 || filters.length > 0;
 
+  // How far the sort or scan for these parameters is (polled while /api/meta waits for it).
+  if (url.pathname === '/api/progress') {
+    return reply(200, pv ? { active: false } : flat.progress(rows, keys, filters));
+  }
+
   if (url.pathname === '/api/meta') {
     if (pv) return reply(200, pivot.meta(pv, await pivot.view(pv, keys, filters, cv), cv));
     // Flat: only a filter changes the row count (the scan result is reused by the data requests).
-    const matching = filters.length ? (await flat.view(rows, keys, filters)).count : rows;
+    const matching = filters.length ? (await flat.view(rows, keys, filters, cancelled)).count : rows;
+    if (cancelled()) return null;
     return reply(200, flat.meta(rows, cols, matching));
   }
 
@@ -1219,7 +1371,7 @@ export async function handleApiRequest({ url, method = 'GET', readBody = async (
   }
 
   // The view maps row positions to data (may scan or sort the first time: "database time").
-  const view = pv ? await pivot.view(pv, keys, filters, cv) : await flat.view(rows, keys, filters);
+  const view = pv ? await pivot.view(pv, keys, filters, cv) : await flat.view(rows, keys, filters, cancelled);
 
   // Simulated network/database time, with jitter so responses arrive out of order like real ones.
   if (latency > 0) await sleep(latency * (0.5 + Math.random()));

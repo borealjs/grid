@@ -49,15 +49,17 @@ function showToast(message, isError = false) {
 const grid = createGrid(document.getElementById('grid'), {
   dataSource: source,
   ...shape,
-  notices: false, // this page shows its own toasts
+  // The grid's own notices show slow sorts and filters (with Cancel) and refusals; this page adds toasts
+  // for results and copies.
   // The row limits are this demo backend's (it scans rows, with no index), not the grid's.
   messages: {
     filterLimit: (limit, total) => `This demo's backend filters up to ${fmt.format(limit)} rows by scanning them, and this table has ${fmt.format(total)}. A backend with database indexes can filter tables of any size. Set fewer rows above to try filtering here.`,
     sortLimit: (limit, total) => `This demo's backend sorts by several columns up to ${fmt.format(limit)} rows, and this table has ${fmt.format(total)}. A backend with database indexes can do it at any size. Set fewer rows above to try it here.`,
   },
   onViewChange: (info) => {
-    if (info.pending) return showToast(info.what === 'sort' ? 'Sorting…' : 'Filtering…');
-    if (!info.ok) return showToast(info.reason, true);
+    if (info.pending) return;
+    if (info.cancelled) return showToast(`${info.what === 'sort' ? 'Sort' : 'Filter'} cancelled`);
+    if (!info.ok) return;
     if (info.what === 'columns') {
       const dropped = info.droppedSorts ? ` · ${info.droppedSorts} column sort${info.droppedSorts > 1 ? 's' : ''} cleared (columns moved)` : '';
       return showToast(info.filter ? `Showing ${fmt.format(info.cols)} columns · ${info.filter}${dropped}` : `Column filter cleared${dropped}`);
@@ -66,15 +68,6 @@ const grid = createGrid(document.getElementById('grid'), {
       return showToast(info.filter ? `Showing ${fmt.format(info.rows)}${info.totalRows ? ` of ${fmt.format(info.totalRows)}` : ''} rows · ${info.filter}` : 'Filter cleared');
     }
     showToast(info.sort ? `Sorted by ${info.sort}` : 'Sort cleared');
-  },
-  onCopy: (info) => {
-    if (!info.ok) {
-      showToast(info.reason, !info.retry);
-      return;
-    }
-    const size = info.ranges > 1 ? `${info.ranges} ranges, ${fmt.format(info.cells)} cells` : `${fmt.format(info.rows)} × ${fmt.format(info.cols)} (${fmt.format(info.cells)} cell${info.cells === 1 ? '' : 's'})`;
-    const loaded = info.fetched ? ` · loaded ${fmt.format(info.fetched)} from the server in ${fmt.format(info.ms)} ms` : '';
-    showToast(`Copied ${size}${loaded}${info.plainOnly ? ' · text only' : ''}`);
   },
 });
 await grid.ready;
@@ -217,7 +210,7 @@ function updateStatus() {
   parts.push(`${fmt.format(s.cache.cellsFetched)} cells fetched`);
   if (engine.merges.size) parts.push(`${fmt.format(engine.merges.code.size)} code + ${fmt.format(engine.merges.server.size)} server merges`);
   if (s.cache.lastMs) parts.push(`last fetch ${Math.round(s.cache.lastMs)} ms`);
-  if (engine.ratioY > 1) parts.push(`scrollbar scaled ×${fmt.format(Math.round(grid.ratioY))}`);
+  if (engine.ratioY > 1) parts.push(`scrollbar scaled ×${fmt.format(Math.round(engine.ratioY))}`);
   status.textContent = parts.join('  ·  ');
 }
 setInterval(updateStatus, 250);

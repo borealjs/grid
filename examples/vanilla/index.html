@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Virtual Grid</title>
+  <title>BorealJS Grid · JavaScript example</title>
   <link rel="stylesheet" href="../../packages/grid-core/src/grid.css">
   <link rel="stylesheet" href="demo.css">
 </head>
 <body>
   <header class="toolbar">
-    <strong class="title">Server-backed virtual grid</strong>
+    <strong class="title">BorealJS Grid · JavaScript example</strong>
     <form id="dims" class="group">
       <label>Mode
         <select name="mode">
@@ -19,7 +19,7 @@
       </label>
       <label><span data-rows-label>Rows</span> <input name="rows" inputmode="numeric" size="14"></label>
       <label data-mode="flat">Cols <input name="cols" inputmode="numeric" size="11"></label>
-      <label data-mode="pivot">Years <input name="years" inputmode="numeric" size="6"></label>
+      <label data-mode="pivot" title="Each year adds 68 columns: 4 measures × (12 months + 4 quarter totals + a year total)">Years of columns <input name="years" inputmode="numeric" size="6"></label>
       <label>Latency
         <select name="latency">
           <option value="0">0 ms</option>

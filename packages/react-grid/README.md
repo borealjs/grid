@@ -41,7 +41,7 @@ components.
 - [Columns](#columns)
 - [Custom cells](#custom-cells)
 - [Data](#data): [in memory](#in-memory-rows), [from a server](#server-data-usedatasource)
-- [Sorting and filtering](#sorting-and-filtering), [custom filters](#custom-filters)
+- [Sorting and filtering](#sorting-and-filtering), [slow sorts and filters](#slow-sorts-and-filters), [custom filters](#custom-filters)
 - [Controlled state](#controlled-state)
 - [Selection and copy](#selection-and-copy)
 - [Grid API (ref)](#grid-api-ref)
@@ -276,7 +276,40 @@ Value lists show at most 1,000 values; beyond that the dialog asks the user to r
 columns with a modest set of repeated values (status, city, owner); text search suits near-unique ones (names,
 codes).
 
-If your backend can't sort or filter very large tables, return `maxSortRows` / `maxFilterRows` from
+To decide in one place what can be sorted or filtered, including pivot levels, pass a function. It is asked
+about each column (`{ axis: 'cols', column, key }`) and level (`{ axis: 'rows' | 'cols', level }`):
+
+```jsx
+<VirtualGrid
+  dataSource={source}
+  sortable={(target) => target.key !== 'notes'}
+  filterable={(target) => target.axis !== 'rows' || target.level < 2}
+/>
+```
+
+### Slow sorts and filters
+
+When a sort or filter takes more than a moment, the grid shows what it is doing with a Cancel button.
+`getLayout` receives `onProgress` to say how far it is, and cancelling aborts its `signal`:
+
+```jsx
+const source = useDataSource({
+  async getLayout({ query, signal, onProgress }) {
+    const job = await api.startCount(query, { signal });
+    while (!job.done) {
+      onProgress({ phase: 'Checking rows', done: job.checked, total: job.rows });
+      await job.next();
+    }
+    return { rowCount: job.count };
+  },
+  getCells,
+});
+```
+
+`grid.current.cancel()` stops it from code; `onViewChange` reports `{ pending: true, progress }` and
+`{ cancelled: true }`.
+
+If your backend can't sort or filter very large tables at all, return `maxSortRows` / `maxFilterRows` from
 `getLayout`. The grid then explains the limit to the user instead of sending requests that would fail.
 
 ### Custom filters
@@ -577,15 +610,15 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 
 | Prop | Type | Default | |
 |---|---|---|---|
-| `sortable` | `boolean` | `true` | |
+| `sortable` | `boolean \| (target) => boolean` | `true` | a function decides per column or level |
 | `multiSort` | `boolean` | `true` | Shift+click adds columns to the sort |
-| `filterable` | `boolean` | `true` | |
+| `filterable` | `boolean \| (target) => boolean` | `true` | a function decides per column or level |
 | `resizable` | `boolean` | `true` | |
 | `expandable` | `boolean` | `true` | expand and collapse pivot groups |
 | `selection` | `'multi' \| 'single' \| 'none'` | `'multi'` | |
 | `copy` | `boolean` | `true` | ⌘C / Ctrl+C |
 | `keyboard` | `boolean` | `true` | |
-| `notices` | `boolean` | `true` | a short message when a sort or filter is refused or fails |
+| `notices` | `boolean` | `true` | short messages in the grid: copies, and slow, refused or failed sorts and filters |
 | `columnChooser` | `boolean` | on when columns have a `group` | a corner menu to show and hide column groups |
 
 #### Look
@@ -624,7 +657,7 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 | `onSelectionChange` | `{ active, ranges, text, rows, cols, cells }` |
 | `onCopy` | `{ ok, cells, rows, cols, ms, reason? }` |
 | `onColumnResize` | `{ column, key, width }`, when the user lets go |
-| `onViewChange` | `{ what, pending }` while a sort or filter runs, then `{ what, ok, rows, reason? }` |
+| `onViewChange` | `{ what, pending, progress? }` while a sort or filter runs, then `{ what, ok, rows, reason? }` or `{ what, cancelled: true }` |
 | `onError` | `(error, { kind: 'layout' \| 'cells' \| 'labels' })`; errors are logged when this is not set |
 | `onReady` | `(grid)` once the grid is drawn |
 
@@ -662,6 +695,7 @@ What the `ref` gives you.
 | `setSort(sort)`, `setFilter(filter)`, `setColumnFilter(list)` | change uncontrolled state; resolve to `false` if refused |
 | `toggleSort(field, additive?)` | what a header click does |
 | `openFilter(field)`, `closeFilter()` | the filter dialog |
+| `cancel()` | stop a sort or filter that is still running |
 | `getSelection()`, `setSelection(sel)`, `selectAll()`, `selectionInfo()` | selection |
 | `copySelection()` | copy, as with ⌘C / Ctrl+C |
 | `cellValue(row, col)`, `cellText(row, col)` | a loaded cell's value or text |

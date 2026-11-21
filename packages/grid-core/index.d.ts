@@ -90,6 +90,13 @@ export interface PivotLayout {
 
 export type Layout = TableLayout | PivotLayout;
 
+/** How far a slow sort or filter is. `phase` is shown as is, e.g. "Checking rows". */
+export interface Progress {
+  phase?: string;
+  done?: number;
+  total?: number;
+}
+
 export interface FilterValuesRequest {
   /** Table column (source index) and its key, or a pivot dimension (`axis` + `level`). */
   column?: number;
@@ -118,8 +125,12 @@ export interface FilterValuesResult {
 export interface DataSource<V = unknown> {
   /** Cells of one or more rects. */
   getCells(request: { rects: CellRect[]; query: Query; signal?: AbortSignal }): Promise<CellsResult<V>> | CellsResult<V>;
-  /** Row count (tables) or the row/column trees (pivots) for a query. Needed for filtering and pivots. */
-  getLayout?(request: { query: Query; signal?: AbortSignal }): Promise<Layout> | Layout;
+  /**
+   * Row count (tables) or the row/column trees (pivots) for a query. Needed for filtering and pivots.
+   * A slow sort or filter may report how far it is with onProgress; the grid shows it with a Cancel button,
+   * and cancelling aborts `signal`.
+   */
+  getLayout?(request: { query: Query; signal?: AbortSignal; onProgress?(progress: Progress): void }): Promise<Layout> | Layout;
   /** Header labels for very large axes (pivot groups, column titles not given in column definitions). */
   getLabels?(request: { axis: 'rows' | 'cols'; level: number; start: number; count: number; query: Query; signal?: AbortSignal }): Promise<(string | null)[]> | (string | null)[];
   /** Distinct values for value-list filters (first `limit` matching `search`). */
@@ -242,9 +253,20 @@ export interface Messages {
   selectAll: string;
   columns: string;
   applying: string;
+  cancel: string;
+  /** A sort or filter that takes a while: "Filtering… Checking rows · 42% · 7 s". */
+  working(what: 'sort' | 'filter' | 'columns', progress: Progress | null, seconds: number): string;
   filterLimit(limit: number, total: number): string;
   sortLimit(limit: number, total: number): string;
   failed(what: 'sort' | 'filter', reason: string): string;
+  /** While cells that are not on screen load for a copy. */
+  copying(cells: number): string;
+  /** After a copy: "Copied 20 × 5 (100 cells)". */
+  copied(info: CopyInfo): string;
+  copyTooLarge(cells: number, limit: number): string;
+  copyRefused: string;
+  copyLoadFailed(reason: string): string;
+  copyAgain(loaded: number, shortcut: string): string;
 }
 
 export const DEFAULT_MESSAGES: Messages;
@@ -284,7 +306,11 @@ export interface CopyInfo {
 
 export interface ViewChangeInfo {
   pending?: boolean;
+  /** While pending: how far the data source says it is. */
+  progress?: Progress;
   ok?: boolean;
+  /** The user (or grid.cancel()) stopped it. */
+  cancelled?: boolean;
   what: 'sort' | 'filter' | 'columns';
   reason?: string;
   rows?: number;
@@ -296,6 +322,11 @@ export interface ViewChangeInfo {
 }
 
 // ------------------------------------------------------------------ options
+
+/** What a sortable rule is asked about: a column, or a pivot row level. */
+export type SortTarget = { axis: 'cols'; column: number; key?: string } | { axis: 'rows'; level: number };
+/** What a filterable rule is asked about: a column, a pivot row level, or a column level (pivot dimensions; the column chooser is level 0). */
+export type FilterTarget = SortTarget | { axis: 'cols'; level: number };
 
 export interface GridOptions<V = unknown> {
   dataSource: DataSource<V>;
@@ -324,9 +355,11 @@ export interface GridOptions<V = unknown> {
   messages?: Partial<Messages>;
 
   // Features (all on by default)
-  sortable?: boolean;
+  /** false turns sorting off; a function decides per column or pivot row level. */
+  sortable?: boolean | ((target: SortTarget) => boolean);
   multiSort?: boolean;
-  filterable?: boolean;
+  /** false turns filtering off; a function decides per column, pivot row level or pivot column level. */
+  filterable?: boolean | ((target: FilterTarget) => boolean);
   resizable?: boolean;
   expandable?: boolean;
   selection?: 'multi' | 'single' | 'none';
@@ -396,6 +429,8 @@ export declare class Grid {
   toggleSort(column: number | string, additive?: boolean): Promise<boolean>;
   openFilter(target: number | string | { level: number } | { columnLevel: number }): void;
   closeFilter(): void;
+  /** Stop a sort or filter that is still being applied. Returns false when none is running. */
+  cancel(): boolean;
 
   refresh(): Promise<void>;
   repaint(): void;

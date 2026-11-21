@@ -102,8 +102,12 @@ No build step? Load it from a CDN; see [Without a bundler](packages/grid-core/RE
 
 ## Try the demos
 
-The repository has two demos: a plain JavaScript one with a billion-row table and a pivot, and a React one
-with custom cells, filters and a server-backed table.
+The [live demo](https://borealjs.github.io/grid/) shows React cells and filters, a custom backend, a pivot with
+merged cells, and a billion-row table with size and latency controls and live stats. Its Options panel turns
+every setting on and off and gives you the code for it, in React or plain JavaScript.
+
+The repository also has a [plain JavaScript example](examples/vanilla), with no React. To run both on your
+machine:
 
 ```bash
 git clone https://github.com/borealjs/grid.git && cd grid && npm install
@@ -117,10 +121,10 @@ npm start
 npm run dev:react
 ```
 
-`npm start` serves the JavaScript demo at http://localhost:5174. `npm run dev:react` serves the React demo at
-http://localhost:5175; keep `npm start` running for its server-data tabs. `npm run build:demo` builds the
-static React demo that is published as the [live demo](https://borealjs.github.io/grid/): no server, the
-demo backend (`demo-backend.mjs`) runs in the browser.
+`npm start` runs the demo server and the plain JavaScript example at http://localhost:5174. `npm run dev:react`
+serves the live demo with hot reload at http://localhost:5175; keep `npm start` running for its server tabs.
+`npm run preview:demo` builds the live demo and serves it at http://localhost:4173/grid/, exactly as it is
+published: no server, the demo backend runs in the browser.
 
 ## Links
 
