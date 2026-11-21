@@ -9,6 +9,8 @@ A React data grid that stays smooth at any size. Hand it an array, or connect a 
 through millions of rows (billions with a server). Cells, headers, filters and the empty state are plain React
 components.
 
+**[Live demo](https://borealjs.github.io/grid/)**: a billion-row table, a pivot and React cells, right in your browser.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/borealjs/grid/main/media/grid-dark.png">
   <img alt="A pivot table with one billion rows, grouped headers and quarterly subtotals" src="https://raw.githubusercontent.com/borealjs/grid/main/media/grid-light.png">

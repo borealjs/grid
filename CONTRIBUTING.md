@@ -20,6 +20,7 @@ git clone https://github.com/borealjs/grid.git && cd grid && npm install
 |---|---|
 | `npm start` | demo server and the plain JavaScript demo at http://localhost:5174 |
 | `npm run dev:react` | the React demo at http://localhost:5175 (keep `npm start` running) |
+| `npm run build:demo` | the static live demo (no server) in `examples/react/dist`; deployed to GitHub Pages from `main` |
 | `npm test` | tests |
 | `npm run typecheck` | checks the TypeScript types against `test/types` |
 
@@ -30,7 +31,8 @@ The repository is an npm workspace:
 | `packages/grid-core` | `@borealjs/grid-core`: the grid (plain ES modules, no build step) |
 | `packages/react-grid` | `@borealjs/react-grid`: the React component and hooks |
 | `examples/` | the two demos |
-| `server.mjs` | demo backend that also serves the demos |
+| `server.mjs` | demo server: the `/api` protocol over HTTP, plus the demo pages |
+| `demo-backend.mjs` | the demo backend's data and request handling; the static live demo runs it in the browser |
 | `test/` | tests and type tests |
 
 ## Pull requests

@@ -13,6 +13,8 @@
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/npm/l/@borealjs/grid-core"></a>
 </p>
 
+<p align="center"><b><a href="https://borealjs.github.io/grid/">Live demo</a></b>: a billion-row table, a pivot and React cells, right in your browser.</p>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/borealjs/grid/main/media/grid-dark.png">
   <img alt="A pivot table in BorealJS Grid with one billion rows, grouped headers and quarterly subtotals" src="https://raw.githubusercontent.com/borealjs/grid/main/media/grid-light.png">
@@ -116,7 +118,9 @@ npm run dev:react
 ```
 
 `npm start` serves the JavaScript demo at http://localhost:5174. `npm run dev:react` serves the React demo at
-http://localhost:5175; keep `npm start` running for its server-data tabs.
+http://localhost:5175; keep `npm start` running for its server-data tabs. `npm run build:demo` builds the
+static React demo that is published as the [live demo](https://borealjs.github.io/grid/): no server, the
+demo backend (`demo-backend.mjs`) runs in the browser.
 
 ## Links
 

@@ -12,7 +12,8 @@
     "dev:react": "npm run dev --workspace examples/react",
     "typecheck": "tsc -p test/types",
     "version-packages": "node scripts/version-packages.mjs",
-    "publish-packages": "node scripts/publish-packages.mjs"
+    "publish-packages": "node scripts/publish-packages.mjs",
+    "build:demo": "npm run build:pages --workspace examples/react"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",

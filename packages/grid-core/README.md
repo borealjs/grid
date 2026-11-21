@@ -9,6 +9,8 @@ A data grid for the web that stays smooth at any size: thousands to billions of 
 columns. Give it an array, or a few async callbacks that read from your backend. Works with plain JavaScript
 and any framework; React users want [`@borealjs/react-grid`](https://www.npmjs.com/package/@borealjs/react-grid).
 
+**[Live demo](https://borealjs.github.io/grid/)**: a billion-row table, a pivot and custom cells, right in your browser.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/borealjs/grid/main/media/grid-dark.png">
   <img alt="A pivot table with one billion rows, grouped headers and quarterly subtotals" src="https://raw.githubusercontent.com/borealjs/grid/main/media/grid-light.png">

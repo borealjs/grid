@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { VirtualGrid, Column, createHttpSource, useDataSource } from '@borealjs/react-grid';
 import { EMPTY_QUERY } from '@borealjs/grid-core';
+import { inBrowserFetch } from './inBrowserApi.js';
+
+// The static build (npm run build:pages, GitHub Pages) has no server: the server tabs then run the
+// reference backend's code in the browser behind a fake fetch. Otherwise they call npm start through /api.
+const IN_BROWSER = import.meta.env.MODE === 'pages';
+const serverSource = (params) => createHttpSource({ baseUrl: '/api', params, ...(IN_BROWSER && { fetch: inBrowserFetch }) });
 
 const TABS = [
   { id: 'memory', label: 'In-memory · React cells' },
@@ -16,6 +22,7 @@ export default function App() {
     <div className={`app app-${theme}`}>
       <header className="bar">
         <strong>BorealJS Grid</strong>
+        {IN_BROWSER && <a className="muted" href="https://github.com/borealjs/grid">GitHub</a>}
         <nav className="tabs" role="tablist">
           {TABS.map((t) => (
             <button key={t.id} role="tab" aria-selected={tab === t.id} className={tab === t.id ? 'on' : ''} onClick={() => setTab(t.id)}>{t.label}</button>
@@ -268,7 +275,7 @@ function CustomBackendDemo({ theme }) {
 // ------------------------------------------------------------------ server pivot
 
 function PivotDemo({ theme }) {
-  const source = useMemo(() => createHttpSource({ baseUrl: '/api', params: { mode: 'pivot', rows: 50_000, years: 10, latency: 40 } }), []);
+  const source = useMemo(() => serverSource({ mode: 'pivot', rows: 50_000, years: 10, latency: 40 }), []);
   const grid = useRef(null);
   const [levels, setLevels] = useState(null);
   return (
@@ -298,7 +305,7 @@ function PivotDemo({ theme }) {
 // ------------------------------------------------------------------ server table, a billion rows
 
 function HugeTableDemo({ theme }) {
-  const source = useMemo(() => createHttpSource({ baseUrl: '/api', params: { mode: 'flat', rows: 1_000_000_000, cols: 1_000_000, latency: 40 } }), []);
+  const source = useMemo(() => serverSource({ mode: 'flat', rows: 1_000_000_000, cols: 1_000_000, latency: 40 }), []);
   const [layout, setLayout] = useState(null);
   const [error, setError] = useState(null);
   useEffect(() => {
@@ -314,7 +321,7 @@ function HugeTableDemo({ theme }) {
       return { group: types[i % types.length], type: k?.kind === 'number' ? 'number' : undefined, filter: k?.kind === 'values' ? { type: 'values', values: k.values } : k?.kind };
     };
   }, [layout]);
-  if (error) return <p className="note">Start the reference server first (npm start, port 5174): {error.message}</p>;
+  if (error) return <p className="note">{IN_BROWSER ? 'Could not load the table' : 'Start the reference server first (npm start, port 5174)'}: {error.message}</p>;
   if (!layout) return <p className="note">Loading…</p>;
   return (
     <section className="demo">
