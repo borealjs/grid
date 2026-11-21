@@ -1,7 +1,7 @@
 {
   "name": "@borealjs/grid-core",
   "version": "0.1.0",
-  "description": "DOM virtual grid for billions of rows and millions of columns, fed by async callbacks: sorting, filtering, pivots, merged cells, selection and copy.",
+  "description": "Fast data grid for the web: billions of rows from memory or any backend, with sorting, filtering, pivots, selection and copy. No dependencies.",
   "type": "module",
   "license": "MIT",
   "repository": {

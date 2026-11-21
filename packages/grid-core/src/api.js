@@ -101,6 +101,7 @@ export class Grid {
       initial,
       api: this,
       theme: this.#theme,
+      ariaLabel: o.ariaLabel,
       messages: o.messages,
       sortable: o.sortable !== false,
       filterable: o.filterable !== false,
@@ -181,12 +182,17 @@ export class Grid {
     const changed = Object.keys(next).filter((k) => next[k] !== prev[k]);
     if (!changed.length) return Promise.resolve();
     this.#opts = { ...prev, ...next };
-    const structural = changed.filter((k) => !CALLBACKS.includes(k) && !HOOKS.includes(k) && !QUERY_KEYS.includes(k) && k !== 'theme' && k !== 'controlled'
+    const structural = changed.filter((k) => !CALLBACKS.includes(k) && !HOOKS.includes(k) && !QUERY_KEYS.includes(k) && k !== 'theme' && k !== 'controlled' && k !== 'ariaLabel'
       && !['defaultSort', 'defaultFilter', 'defaultColumnFilter'].includes(k));
     const hookPresence = changed.some((k) => HOOKS.includes(k) && typeof prev[k] !== typeof next[k]);
     if (structural.length || hookPresence || !this.#engine) return this.rebuild();
     const e = this.#engine;
     if (changed.includes('controlled')) e.o.controlled = this.#opts.controlled;
+    if (changed.includes('ariaLabel')) {
+      e.o.ariaLabel = next.ariaLabel;
+      if (next.ariaLabel) e.scroller.setAttribute('aria-label', next.ariaLabel);
+      else e.scroller.removeAttribute('aria-label');
+    }
     if (changed.includes('theme')) {
       const theme = THEMES.includes(next.theme) ? next.theme : 'auto';
       this.#host.classList.replace(`vg-${this.#theme}`, `vg-${theme}`);

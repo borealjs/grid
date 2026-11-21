@@ -16,7 +16,6 @@ test('VirtualGrid renders on the server without touching the DOM', () => {
     ),
   );
   assert.match(html, /class="grid"/);
-  assert.match(html, /aria-label="Demo"/);
 });
 
 test('useDataSource works during server rendering', () => {

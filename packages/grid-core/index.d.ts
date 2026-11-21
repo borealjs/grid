@@ -32,7 +32,7 @@ export const EMPTY_QUERY: Readonly<Query>;
 
 // ------------------------------------------------------------------ data source
 
-/** A rectangle of cells in source coordinates. */
+/** A rectangle of cells: rows are positions in the sorted / filtered result, columns are column indexes. */
 export interface CellRect {
   row: number;
   col: number;
@@ -40,7 +40,7 @@ export interface CellRect {
   colCount: number;
 }
 
-/** Merged cell in source coordinates. */
+/** A merged cell: rows and columns as in CellRect. */
 export interface Merge {
   r0: number;
   c0: number;
@@ -112,11 +112,11 @@ export interface FilterValuesResult {
 }
 
 /**
- * Where the data comes from. Only getCells is required. The grid caches, de-duplicates, batches,
- * prioritizes and aborts requests itself; every call gets an AbortSignal.
+ * Where the data comes from. Only getCells is required. The grid asks only for what is on screen; every
+ * call gets an AbortSignal (pass it to fetch so requests that are no longer needed are cancelled).
  */
 export interface DataSource<V = unknown> {
-  /** Cells of one or more rects (scattered rows/columns are batched into one call). */
+  /** Cells of one or more rects. */
   getCells(request: { rects: CellRect[]; query: Query; signal?: AbortSignal }): Promise<CellsResult<V>> | CellsResult<V>;
   /** Row count (tables) or the row/column trees (pivots) for a query. Needed for filtering and pivots. */
   getLayout?(request: { query: Query; signal?: AbortSignal }): Promise<Layout> | Layout;
@@ -205,7 +205,7 @@ export interface ColumnDef<V = unknown> {
   /** Group name for the column chooser (column filter level 0). */
   group?: string;
   filter?: FilterKind;
-  /** Value -> text (fast path: the cell stays a text node). */
+  /** Value -> text shown in the cell (fastest way to customize a cell). */
   format?(value: V, ctx: CellContext<V> | null): string;
   /** Extra CSS class for a cell from its value. */
   cellClass?(value: V, ctx: CellContext<V> | null): string | undefined | null | false;
@@ -319,6 +319,8 @@ export interface GridOptions<V = unknown> {
   columnChooser?: boolean;
   columnGroups?: string[];
   theme?: 'auto' | 'light' | 'dark';
+  /** Accessible name of the grid, read by screen readers. */
+  ariaLabel?: string;
   messages?: Partial<Messages>;
 
   // Features (all on by default)
@@ -363,7 +365,7 @@ export interface GridOptions<V = unknown> {
   onError?(error: unknown, context: { kind: 'layout' | 'cells' | 'labels' }): void;
   onReady?(grid: Grid): void;
 
-  /** Advanced: a custom model instead of the table / pivot layouts. */
+  /** Low-level: a custom layout model. May change in any release. */
   model?: unknown;
 }
 
@@ -373,7 +375,7 @@ export declare class Grid {
   /** Resolves when the first layout is in and the grid is drawn. */
   ready: Promise<void>;
   readonly options: GridOptions;
-  /** Advanced: the engine (models, axes, caches). */
+  /** Low-level access to the grid's internals. May change in any release. */
   readonly engine: VirtualGrid | undefined;
   readonly rowCount: number;
   readonly columnCount: number;
@@ -447,7 +449,7 @@ export function createHttpSource(options?: {
 export function compareValues(a: unknown, b: unknown): number;
 export function defaultFormat(value: unknown): string;
 
-// ------------------------------------------------------------------ advanced building blocks
+// ------------------------------------------------------------------ low-level pieces (may change in any release)
 
 export declare class VirtualGrid {
   constructor(host: HTMLElement, options: Record<string, unknown>);

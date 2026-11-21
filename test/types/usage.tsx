@@ -65,3 +65,7 @@ export function Readme({ customers }: { customers: Customer[] }) {
     </VirtualGrid>
   );
 }
+
+// Accessible name: `aria-label` in React, `ariaLabel` in the core options.
+export const Labelled = ({ customers }: { customers: Customer[] }) => <VirtualGrid rows={customers} aria-label="Customers" />;
+createGrid(document.body, { dataSource: ds, ariaLabel: 'Customers' });

@@ -1,7 +1,7 @@
 {
   "name": "@borealjs/react-grid",
   "version": "0.1.0",
-  "description": "React wrapper for @borealjs/grid-core: a virtual data grid for billions of rows, fed by async callbacks, with React cells, headers and filters.",
+  "description": "React data grid for huge datasets: in-memory rows or any backend, React cells, headers and filters, sorting, filtering, pivots and copy.",
   "type": "module",
   "license": "MIT",
   "repository": {

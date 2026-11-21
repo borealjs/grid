@@ -1,32 +1,129 @@
-# BorealJS Grid
+<h1 align="center">BorealJS Grid</h1>
 
-A virtual data grid for any number of rows and columns, as two packages:
+<p align="center">
+  A data grid for the web that stays smooth at any size: thousands to <b>billions</b> of rows and up to
+  <b>millions</b> of columns.<br/>React or plain JavaScript, data in memory or from any backend.
+</p>
 
-| Path | Package | |
+<p align="center">
+  <a href="https://www.npmjs.com/package/@borealjs/react-grid"><img alt="npm: @borealjs/react-grid" src="https://img.shields.io/npm/v/@borealjs/react-grid?label=%40borealjs%2Freact-grid"></a>
+  <a href="https://www.npmjs.com/package/@borealjs/grid-core"><img alt="npm: @borealjs/grid-core" src="https://img.shields.io/npm/v/@borealjs/grid-core?label=%40borealjs%2Fgrid-core"></a>
+  <a href="https://bundlejs.com/?q=@borealjs/grid-core"><img alt="Bundle size" src="https://deno.bundlejs.com/badge?q=@borealjs/grid-core"></a>
+  <a href="https://github.com/borealjs/grid/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/borealjs/grid/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/npm/l/@borealjs/grid-core"></a>
+</p>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/borealjs/grid/main/media/grid-dark.png">
+  <img alt="A pivot table in BorealJS Grid with one billion rows, grouped headers and quarterly subtotals" src="https://raw.githubusercontent.com/borealjs/grid/main/media/grid-light.png">
+</picture>
+
+## Features
+
+- **Any size.** Smooth scrolling through billions of rows and millions of columns; only what is on screen is
+  loaded.
+- **Any data.** An array in memory, or your backend through a few async callbacks (REST, GraphQL, SQL, a
+  worker).
+- **Sorting and filtering.** Multi-column sort; filters for ranges, dates, text and searchable value lists,
+  plus your own.
+- **Pivots.** Grouped row and column headers, subtotals, expand and collapse.
+- **Spreadsheet feel.** Range selection, copy into Excel or Google Sheets, merged cells, full keyboard support.
+- **Yours to shape.** Custom cells, headers, filters and empty state; theme with CSS variables; dark mode;
+  translations.
+- **Small.** About 34 kB gzipped, no dependencies, TypeScript types included.
+
+## Packages
+
+| Package | For | Guide |
 |---|---|---|
-| `packages/grid-core` | `@borealjs/grid-core` | framework-free grid, data sources, styles, types |
-| `packages/react-grid` | `@borealjs/react-grid` | `<VirtualGrid>` with React cells, headers and filters |
-| `examples/vanilla` | | the original demo (pivot / flat, a billion rows) on the public API |
-| `examples/react` | | Vite app: in-memory rows with React cells, custom filter, controlled sort; server pivot; 1B × 1M |
-| `server.mjs` | | reference backend for the HTTP protocol (procedural data, any size, simulated latency) |
-| `test/` | | `npm test` (node:test, no dependencies) |
+| [`@borealjs/react-grid`](https://www.npmjs.com/package/@borealjs/react-grid) | React 18 and 19 | [React guide](packages/react-grid/README.md) |
+| [`@borealjs/grid-core`](https://www.npmjs.com/package/@borealjs/grid-core) | plain JavaScript, or any other framework | [JavaScript guide](packages/grid-core/README.md) |
+
+## Quick start: React
 
 ```bash
-npm install
-npm start            # reference server + vanilla demo: http://localhost:5174
-npm run dev:react    # React example: http://localhost:5175 (server tabs need npm start too)
-npm test
+npm install @borealjs/react-grid @borealjs/grid-core
 ```
 
-## Design choices (and why)
+```jsx
+import { VirtualGrid, Column } from '@borealjs/react-grid';
+import '@borealjs/grid-core/style.css';
 
-- **One data-source object of callbacks** (`getCells`, optional `getLayout`, `getFilterValues`, `getLabels`)
-  instead of fixed endpoints, like MUI X `dataSource.getRows` and AG Grid's server-side datasource. The grid
-  keeps everything hard on its side: caching (LRU by cell budget), de-duplication, prioritizing what is near
-  the viewport, batching scattered strips into one call, aborting what scrolled away. Unlike row-only APIs,
-  requests are 2-D rectangles, so a million columns work the same way as a billion rows.
-- **A structured query** (`sort`, `filter`, `columnFilter` with column index *and* key) that maps directly
-  onto SQL / search engines; custom filters pass through as `{ op, value }`.
-- **Customization in layers**: `format` / `cellClass` (cheapest) → `renderCell` / `renderHeader` → custom
-  filter dialogs → `messages` and `--vg-*` theme tokens → feature switches → a custom `model` for layouts
-  the table and pivot do not cover.
+const customers = [
+  { name: 'Ada Lovelace', status: 'Active', amount: 1200 },
+  { name: 'Grace Hopper', status: 'Pending', amount: 950 },
+  { name: 'Alan Turing', status: 'Active', amount: 1430 },
+];
+
+export default function App() {
+  return (
+    <VirtualGrid rows={customers} style={{ height: 400 }} aria-label="Customers">
+      <Column field="name" title="Customer" />
+      <Column field="status" title="Status" filter="values" />
+      <Column field="amount" title="Amount" type="number" />
+    </VirtualGrid>
+  );
+}
+```
+
+## Quick start: JavaScript
+
+```bash
+npm install @borealjs/grid-core
+```
+
+```html
+<div id="grid" style="height: 400px"></div>
+```
+
+```js
+import { createGrid, createArraySource } from '@borealjs/grid-core';
+import '@borealjs/grid-core/style.css';
+
+const customers = [
+  { name: 'Ada Lovelace', status: 'Active', amount: 1200 },
+  { name: 'Grace Hopper', status: 'Pending', amount: 950 },
+];
+const columns = [
+  { key: 'name', title: 'Customer' },
+  { key: 'status', title: 'Status', filter: 'values' },
+  { key: 'amount', title: 'Amount', type: 'number' },
+];
+
+createGrid(document.getElementById('grid'), {
+  dataSource: createArraySource(customers, { columns }),
+  columns,
+});
+```
+
+No build step? Load it from a CDN; see [Without a bundler](packages/grid-core/README.md#without-a-bundler).
+
+## Try the demos
+
+The repository has two demos: a plain JavaScript one with a billion-row table and a pivot, and a React one
+with custom cells, filters and a server-backed table.
+
+```bash
+git clone https://github.com/borealjs/grid.git && cd grid && npm install
+```
+
+```bash
+npm start
+```
+
+```bash
+npm run dev:react
+```
+
+`npm start` serves the JavaScript demo at http://localhost:5174. `npm run dev:react` serves the React demo at
+http://localhost:5175; keep `npm start` running for its server-data tabs.
+
+## Links
+
+- [Releases and changelog](https://github.com/borealjs/grid/releases)
+- [Report a bug or ask for a feature](https://github.com/borealjs/grid/issues)
+- [Contributing](CONTRIBUTING.md)
+
+## License
+
+[MIT](LICENSE)

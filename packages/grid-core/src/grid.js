@@ -1559,6 +1559,7 @@ export class VirtualGrid {
     this.scroller = div('vg-scroller', host);
     this.scroller.tabIndex = 0;
     this.scroller.setAttribute('role', 'grid');
+    if (this.o.ariaLabel) this.scroller.setAttribute('aria-label', this.o.ariaLabel);
     this.scroller.setAttribute('aria-rowcount', String(this.rows.count + model.colTiers.length));
     this.scroller.setAttribute('aria-colcount', String(this.cols.count + model.rowBands.length));
     this.content = div('vg-content', this.scroller);

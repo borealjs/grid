@@ -233,6 +233,7 @@ export const VirtualGrid = forwardRef(function VirtualGrid(props, ref) {
   const options = {
     ...Object.fromEntries(PASS.map((k) => [k, props[k]])),
     ...stableObjects,
+    ariaLabel: props['aria-label'],
     dataSource,
     columns,
     getColumn,
@@ -322,7 +323,7 @@ export const VirtualGrid = forwardRef(function VirtualGrid(props, ref) {
     null,
     createElement(
       'div',
-      { className, style: { position: 'relative', minHeight: 0, ...style }, id, 'aria-label': props['aria-label'] },
+      { className, style: { position: 'relative', minHeight: 0, ...style }, id },
       createElement('div', { ref: hostRef, style: { position: 'absolute', inset: 0 } }),
     ),
     createElement(Portals, { store }),

@@ -52,7 +52,7 @@ type FieldValue<Row, F> = string extends F ? any : F extends keyof Row ? Row[F] 
 
 /**
  * A column. With in-memory `rows`, `field` names the property to show (or use `value(row)`).
- * Functions may be inline: only structural changes (fields, titles, types, widths, filters) rebuild the grid.
+ * Functions may be inline. Changing a field, title, type, width or filter redraws the whole grid.
  */
 export interface ColumnDef<Row = any, F extends string = string, V = FieldValue<Row, F>>
   extends Omit<CoreColumnDef, 'key' | 'renderCell' | 'renderHeader' | 'filter' | 'format' | 'cellClass' | 'value' | 'compare'> {
@@ -81,7 +81,7 @@ export function createColumnHelper<Row>(): {
 };
 
 export interface VirtualGridProps<Row = any>
-  extends Omit<GridOptions, 'dataSource' | 'columns' | 'getColumn' | 'renderCell' | 'renderHeader' | 'renderEmpty' | 'format' | 'cellClass' | 'controlled'> {
+  extends Omit<GridOptions, 'ariaLabel' | 'dataSource' | 'columns' | 'getColumn' | 'renderCell' | 'renderHeader' | 'renderEmpty' | 'format' | 'cellClass' | 'controlled'> {
   /** In-memory data (sorted, filtered and searched in the browser). New arrays update the grid in place. */
   rows?: readonly Row[];
   /** Or any data source (your backend: see useDataSource). */
@@ -89,7 +89,7 @@ export interface VirtualGridProps<Row = any>
   columns?: ColumnDef<Row>[];
   /** Or declare columns as <Column> children. */
   children?: ReactNode;
-  /** Very wide tables: describe column i (wrap in useCallback; a new function rebuilds the grid). */
+  /** Very wide tables: describe column i (wrap in useCallback; a new function redraws the whole grid). */
   getColumn?(index: number): ColumnDef<Row>;
   /** In-memory rows: custom filter operators, { op: (cellValue, conditionValue, row) => boolean }. */
   filterFns?: Record<string, (value: any, conditionValue: any, row: Row) => boolean>;
@@ -105,6 +105,7 @@ export interface VirtualGridProps<Row = any>
   className?: string;
   style?: CSSProperties;
   id?: string;
+  /** Accessible name of the grid, read by screen readers. */
   'aria-label'?: string;
   ref?: Ref<Grid>;
 }
