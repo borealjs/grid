@@ -10,7 +10,9 @@
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs",
     "dev:react": "npm run dev --workspace examples/react",
-    "typecheck": "tsc -p test/types"
+    "typecheck": "tsc -p test/types",
+    "version-packages": "node scripts/version-packages.mjs",
+    "publish-packages": "node scripts/publish-packages.mjs"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",
