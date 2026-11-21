@@ -92,3 +92,44 @@ people.setRows([{ nope: true }]);
 const typedCore: CoreColumnDef<number, { n: number }> = { key: 'n', value: (row) => row.n, format: (v) => v.toFixed(1) };
 export const model: GridModel | undefined = g.engine?.model;
 export const coreCols = [typedCore];
+
+// Rows by offset / limit, row ids, checkboxes, cell events, pinned and reorderable columns.
+import { createRowSource, type RowSelection, type CellEvent } from '@borealjs/react-grid';
+const rest = createGrid(document.body, {
+  dataSource: { getRows: async ({ offset, limit, sort, filter, signal }) => ({ rows: [{ id: offset, n: limit + sort.length + filter.length, s: String(signal) }], total: 1 }) },
+  columns: [{ key: 'id', pinned: true }, { key: 'n', reorderable: false }],
+  getRowId: (row) => row.id,
+  rowSelection: true,
+  columnOrder: ['n', 'id'],
+  onRowSelectionChange: (sel) => console.log(sel.all ? sel.except : sel.ids),
+  onColumnOrderChange: (order) => console.log(order.join()),
+  onCellClick: ({ row, key, event }) => console.log(row, key, event.type),
+  onCellContextMenu: (e) => e.event.preventDefault(),
+});
+rest.setRowSelection({ all: true, except: [1] });
+const checkedRows: RowSelection = rest.getRowSelection();
+console.log(checkedRows, rest.getRow(0), rest.getColumnOrder());
+rest.setColumnOrder(['id', 'n']);
+// @ts-expect-error: a data source needs rows or cells to be useful, but getRows must return { rows, total }
+createGrid(document.body, { dataSource: { getRows: async () => [] } });
+const explicit = createRowSource<{ id: number }>({ getRows: async () => ({ rows: [{ id: 1 }], total: 1 }), columns: ['id'], pageSize: 50 });
+createGrid(document.body, { dataSource: explicit });
+export function Orders() {
+  const [checked, setChecked] = useState<RowSelection>({ all: false, ids: [] });
+  const source = useDataSource({ getRows: async ({ offset }) => ({ rows: [{ id: offset, name: 'A', status: 'Active' as const, amount: 1 }], total: 1 }) });
+  const open = (e: CellEvent<Customer>) => console.log(e.row?.name, e.key);
+  return (
+    <VirtualGrid<Customer>
+      dataSource={source}
+      getRowId={(row) => row.id}
+      rowSelection
+      selectedRows={checked}
+      onRowSelectionChange={setChecked}
+      onCellDoubleClick={open}
+      onCellContextMenu={({ row, event }) => { event.preventDefault(); console.log(row?.amount); }}
+    >
+      <Column field="id" pinned />
+      <Column field="name" reorderable={false} />
+    </VirtualGrid>
+  );
+}

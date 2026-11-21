@@ -39,6 +39,10 @@ export interface Segment {
   render?: Renderer<HeaderContext>;
   /** Clicking the label expands / collapses this group. */
   toggle?: GroupRef & { axis: AxisName; collapsed: boolean };
+  /** Can be dragged to another place (table columns). */
+  movable?: boolean;
+  /** Row checkbox state (rowSelection); undefined = no checkbox. */
+  check?: boolean;
   // Set by the engine just before drawing:
   selected?: boolean;
   sortState?: SortState | null;
@@ -142,6 +146,13 @@ export interface GridModel {
   reload?(request: ViewRequest): Promise<void>;
   /** Sort / filter / column filter changed: update rows / cols. Throws (or rejects) to refuse. */
   applyView?(request: ApplyViewRequest): Promise<void>;
+
+  // Column order and pinned columns (tables).
+  /** Visible columns kept at the start while scrolling sideways (they come first). */
+  pinnedCols?(): number;
+  /** Source indexes of every column, in display order. */
+  columnOrder?(): number[];
+  setColumnOrder?(order: number[]): void;
 }
 
 /** Initial query of a model, as request signatures (the engine and the model agree on them). */

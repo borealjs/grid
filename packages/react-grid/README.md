@@ -38,12 +38,13 @@ components.
 
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [Columns](#columns)
+- [Columns](#columns): [pinned and reordered](#pinned-and-reordered-columns)
 - [Custom cells](#custom-cells)
-- [Data](#data): [in memory](#in-memory-rows), [from a server](#server-data-usedatasource)
+- [Data](#data): [in memory](#in-memory-rows), [from a server](#server-data-usedatasource), [row ids](#row-ids-getrowid)
 - [Sorting and filtering](#sorting-and-filtering), [slow sorts and filters](#slow-sorts-and-filters), [custom filters](#custom-filters)
 - [Controlled state](#controlled-state)
-- [Selection and copy](#selection-and-copy)
+- [Selection and copy](#selection-and-copy), [checkboxes](#row-checkboxes)
+- [Cell events](#cell-events): click, double-click, context menu
 - [Grid API (ref)](#grid-api-ref)
 - [Styling and theming](#styling-and-theming), [empty state](#empty-state), [translations](#translations)
 - [TypeScript](#typescript)
@@ -130,6 +131,23 @@ const [term, setTerm] = useState('');
 <Column field="name" renderCell={({ value }) => <Highlight text={value} term={term} />} />
 ```
 
+### Pinned and reordered columns
+
+`pinned` keeps a column at the start while the rest scroll sideways. Users can drag column headers to another
+place (Escape cancels); pinned columns stay together at the start.
+
+```jsx
+<VirtualGrid rows={rows} onColumnOrderChange={(order) => save('order', order)} columnOrder={savedOrder}>
+  <Column field="id" title="ID" pinned />
+  <Column field="name" title="Customer" pinned />
+  <Column field="amount" title="Amount" type="number" />
+  <Column field="actions" title="" reorderable={false} />
+</VirtualGrid>
+```
+
+`onColumnOrderChange` gets the fields in their new order; pass them back as `columnOrder` to restore it.
+`reorderable={false}` on the grid turns dragging off.
+
 ## Custom cells
 
 There are three ways to customize a cell, from lightest to most flexible:
@@ -152,7 +170,7 @@ There are three ways to customize a cell, from lightest to most flexible:
 | | |
 |---|---|
 | `value` | the cell's value |
-| `row` | the whole record (with `rows`; `undefined` for server data) |
+| `row` | the whole record (with `rows` or a `getRows` data source; `undefined` with `getCells`) |
 | `text` | the value after `format` |
 | `rowIndex`, `colIndex` | position on screen, after sorting and filtering |
 | `rowSource`, `colSource` | position in the data source |
@@ -184,29 +202,20 @@ position).
 
 ### Server data: `useDataSource`
 
-Give the grid a few async callbacks and it asks them only for what is on screen. Every call gets an
-`AbortSignal`: pass it to `fetch` so requests the grid no longer needs are cancelled.
+Most backends serve rows by offset and limit. Give the grid a `getRows` callback: it asks for the pages on
+screen, reads each cell from the row by its `field`, and gives your cells and events the whole row. Every call
+gets an `AbortSignal`: pass it to `fetch` so requests the grid no longer needs are cancelled.
 
 ```jsx
 import { VirtualGrid, Column, useDataSource } from '@borealjs/react-grid';
 
 function Orders({ customerId }) {
   const source = useDataSource({
-    // How many rows match the current filter.
-    async getLayout({ query, signal }) {
-      const res = await fetch(`/api/orders/count?${toParams(customerId, query)}`, { signal });
-      return { rowCount: (await res.json()).count };
-    },
-
-    // The cells of one or more rectangles.
-    async getCells({ rects, query, signal }) {
-      const res = await fetch('/api/orders/cells', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customerId, rects, query }),
-        signal,
-      });
-      return (await res.json()).cells; // one entry per rect: [[a, b], [c, d]]
+    // Rows offset … offset + limit - 1 of the sorted, filtered result, and how many rows match.
+    async getRows({ offset, limit, sort, filter, signal }) {
+      const params = new URLSearchParams({ customerId, offset, limit, sort: JSON.stringify(sort), filter: JSON.stringify(filter) });
+      const res = await fetch(`/api/orders?${params}`, { signal });
+      return res.json(); // { rows: [{ id: 1, product: 'Lamp', total: 120 }, …], total: 48213 }
     },
 
     // Optional: values for value-list filters.
@@ -217,43 +226,56 @@ function Orders({ customerId }) {
   }, [customerId]); // when these change, the grid reloads in place
 
   return (
-    <VirtualGrid dataSource={source} style={{ height: 600 }} aria-label="Orders">
+    <VirtualGrid dataSource={source} getRowId={(row) => row.id} style={{ height: 600 }} aria-label="Orders">
       <Column field="id" title="Order" type="number" />
       <Column field="product" title="Product" filter="values" />
       <Column field="total" title="Total" type="number" />
+      <Column field="actions" title="" sortable={false} filter={false}
+        renderCell={({ row }) => <button onClick={() => openOrder(row)}>Open</button>} />
     </VirtualGrid>
   );
 }
 ```
 
-A rect is `{ row, col, rowCount, colCount }`. Rows are positions in the sorted and filtered result; columns
-are column indexes. Answer each rect with its rows of values (`[[a, b], [c, d]]`) or one flat array
-(`[a, b, c, d]`).
+`limit` is 100 by default (the page size). The callbacks can use props and state freely, and re-rendering your
+component doesn't reset the grid.
 
-The callbacks can use props and state freely, and re-rendering your component doesn't reset the grid. Only
-`getCells` is required; without `getLayout`, pass `rowCount` (filtering is then off).
-
-The query describes the current sort and filters:
+`sort` and `filter` name columns by their `field`:
 
 ```js
-{
-  sort: [{ key: 'total', column: 2, direction: 'desc' }],
-  filter: [
-    { key: 'total', column: 2, op: 'range', min: 100, max: 500 },   // numbers, or dates as 'YYYY-MM-DD'
-    { key: 'product', column: 1, op: 'in', values: ['Lamp'] },       // also 'notin'
-    { key: 'note', column: 4, op: 'contains', text: 'urgent' },
-    { key: 'score', column: 5, op: 'atLeast', value: 90 },           // custom filters
-  ],
-  columnFilter: [],
-}
+sort: [{ key: 'total', direction: 'desc' }],
+filter: [
+  { key: 'total', op: 'range', min: 100, max: 500 },   // numbers, or dates as 'YYYY-MM-DD'
+  { key: 'product', op: 'in', values: ['Lamp'] },      // also 'notin'
+  { key: 'note', op: 'contains', text: 'urgent' },
+  { key: 'score', op: 'atLeast', value: 90 },          // custom filters
+],
 ```
 
-With SQL, `filter` becomes a parameterized `WHERE` and `sort` becomes `ORDER BY` (add a unique column last so
-the order is stable). Map `key` to column names through an allow-list on the server; never put client text
-into SQL.
+With SQL, `filter` becomes a parameterized `WHERE`, `sort` becomes `ORDER BY` (add a unique column last so the
+order is stable) and `offset` / `limit` become `OFFSET` / `LIMIT`. Map `key` to column names through an
+allow-list on the server; never put client text into SQL.
 
-If your server implements the [HTTP API in the core guide](https://github.com/borealjs/grid/tree/main/packages/grid-core#ready-made-sources),
+**Cells instead of rows.** For pivots, and tables with thousands of columns, the grid can ask for rectangles of
+cells instead: give `getCells({ rects, query, signal })` and `getLayout({ query, signal })` (the row count)
+instead of `getRows`. A rect is `{ row, col, rowCount, colCount }`, with columns as indexes; answer each with
+its rows of values. If your server implements the
+[HTTP API in the core guide](https://github.com/borealjs/grid/tree/main/packages/grid-core#ready-made-sources),
 `createHttpSource({ baseUrl, params, headers })` is a ready-made data source for it.
+
+### Row ids: `getRowId`
+
+Give each row a stable id and the grid keeps track of rows, not positions: after a sort, a filter, new `rows` or
+`refresh()`, the selection stays on the row it was on (and moves to the first row if that row is gone), and
+checked rows are remembered by id.
+
+```jsx
+<VirtualGrid rows={rows} getRowId={(row) => row.id} />
+```
+
+In-memory rows default to the row object itself, so pass `getRowId` when you replace rows with new objects (as
+React state updates do). With `getRows`, the grid finds a moved row among the pages it has loaded; to find rows
+further away, add `indexOfRow(id, query)` to the data source (it returns the row's position, or -1).
 
 ## Sorting and filtering
 
@@ -289,20 +311,20 @@ about each column (`{ axis: 'cols', column, key }`) and level (`{ axis: 'rows' |
 
 ### Slow sorts and filters
 
-When a sort or filter takes more than a moment, the grid shows what it is doing with a Cancel button.
-`getLayout` receives `onProgress` to say how far it is, and cancelling aborts its `signal`:
+When a sort or filter takes more than a moment, the grid shows what it is doing with a Cancel button. The
+request that applies it (`getRows` for the first page, or `getLayout`) receives `onProgress` to say how far it
+is, and cancelling aborts its `signal`:
 
 ```jsx
 const source = useDataSource({
-  async getLayout({ query, signal, onProgress }) {
-    const job = await api.startCount(query, { signal });
+  async getRows({ offset, limit, sort, filter, signal, onProgress }) {
+    const job = await api.startQuery({ sort, filter }, { signal });
     while (!job.done) {
-      onProgress({ phase: 'Checking rows', done: job.checked, total: job.rows });
+      onProgress?.({ phase: 'Checking rows', done: job.checked, total: job.rows });
       await job.next();
     }
-    return { rowCount: job.count };
+    return job.page(offset, limit); // { rows, total }
   },
-  getCells,
 });
 ```
 
@@ -310,7 +332,7 @@ const source = useDataSource({
 `{ cancelled: true }`.
 
 If your backend can't sort or filter very large tables at all, return `maxSortRows` / `maxFilterRows` from
-`getLayout`. The grid then explains the limit to the user instead of sending requests that would fail.
+`getLayout` (with `getCells`). The grid then explains the limit to the user instead of sending requests that would fail.
 
 ### Custom filters
 
@@ -371,6 +393,40 @@ on screen first.
 
 `onSelectionChange` receives `{ active: { r, c }, ranges, text, rows, cols, cells }`. To control the selection,
 pass `selectedCells={{ active, ranges }}`.
+
+### Row checkboxes
+
+`rowSelection` adds a checkbox to each row number; the one in the corner checks every row. Shift+click checks
+a range, and Space checks the active row.
+
+```jsx
+const [checked, setChecked] = useState({ all: false, ids: [] });
+
+<VirtualGrid rows={rows} getRowId={(row) => row.id} rowSelection selectedRows={checked} onRowSelectionChange={setChecked} />
+```
+
+The value is `{ all: false, ids }`, or `{ all: true, except }` after the corner checkbox (every row matching
+the filter, minus some: it works for a billion rows, where listing ids would not). Without `getRowId` rows are
+kept by position, and the checks clear when the sort or filter changes.
+
+## Cell events
+
+```jsx
+<VirtualGrid
+  rows={rows}
+  onCellClick={({ row, key, value }) => setDetail(row)}
+  onCellDoubleClick={({ row }) => openEditor(row)}
+  onCellContextMenu={({ row, event }) => {
+    event.preventDefault();               // instead of the browser's menu
+    showMenu(event.clientX, event.clientY, row);
+  }}
+/>
+```
+
+Each event gets the cell's [context](#custom-cells) (`row`, `value`, `text`, `rowIndex`, `column`, …), its
+`key` and the DOM `event`. A right click outside the selection selects the cell first, and the context-menu key
+(or Shift+F10) opens the menu for the active cell. Clicks on links, buttons and inputs in cells are theirs, not
+cell clicks.
 
 ## Grid API (ref)
 
@@ -559,8 +615,7 @@ filters are kept). Functions can change freely.
 const [search, setSearch] = useState('');
 const deferred = useDeferredValue(search);  // or your own debounce hook
 const source = useDataSource({
-  getLayout: ({ query, signal }) => api.count({ query, search: deferred }, signal),
-  getCells: ({ rects, query, signal }) => api.cells({ rects, query, search: deferred }, signal),
+  getRows: ({ offset, limit, sort, filter, signal }) => api.orders({ search: deferred, offset, limit, sort, filter }, signal),
 }, [deferred]);
 ```
 
@@ -569,10 +624,11 @@ const source = useDataSource({
 ```jsx
 const queryClient = useQueryClient();
 const source = useDataSource({
-  getLayout: ({ query, signal }) =>
-    queryClient.fetchQuery({ queryKey: ['orders', 'count', query], queryFn: () => api.count(query, signal) }),
-  getCells: ({ rects, query, signal }) =>
-    queryClient.fetchQuery({ queryKey: ['orders', 'cells', rects, query], queryFn: () => api.cells(rects, query, signal), staleTime: 60_000 }),
+  getRows: ({ offset, limit, sort, filter, signal }) => queryClient.fetchQuery({
+    queryKey: ['orders', offset, limit, sort, filter],
+    queryFn: () => api.orders({ offset, limit, sort, filter }, signal),
+    staleTime: 60_000,
+  }),
 });
 ```
 
@@ -584,10 +640,10 @@ grid.current.refresh();                 // server data
 setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // in-memory rows
 ```
 
-**Row actions**
+**Row actions** (in-memory rows or a `getRows` data source)
 
 ```jsx
-<Column field="actions" title="" width={120} sortable={false} filter={false}
+<Column field="actions" title="" width={120} sortable={false} filter={false} reorderable={false}
   renderCell={({ row }) => <RowMenu onEdit={() => edit(row)} onDelete={() => remove(row.id)} />} />
 ```
 
@@ -601,6 +657,7 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 |---|---|---|---|
 | `rows` | `Row[]` | | data in memory |
 | `dataSource` | `DataSource` | | or your backend ([server data](#server-data-usedatasource)) |
+| `getRowId` | `(row) => string \| number` | in-memory: the row itself | stable row ids ([row ids](#row-ids-getrowid)) |
 | `columns` | `ColumnDef<Row>[]` | | or `<Column>` children |
 | `columnCount`, `getColumn` | `number`, `(index) => ColumnDef` | | instead of `columns`, for thousands of columns |
 | `rowCount` | `number` | | row count when the data source has no `getLayout` |
@@ -620,6 +677,8 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 | `keyboard` | `boolean` | `true` | |
 | `notices` | `boolean` | `true` | short messages in the grid: copies, and slow, refused or failed sorts and filters |
 | `columnChooser` | `boolean` | on when columns have a `group` | a corner menu to show and hide column groups |
+| `rowSelection` | `boolean` | `false` | [row checkboxes](#row-checkboxes) |
+| `reorderable` | `boolean` | `true` | drag column headers to reorder |
 
 #### Look
 
@@ -646,6 +705,8 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 | `filter`, `defaultFilter` | `FilterItem[]` | |
 | `columnFilter`, `defaultColumnFilter` | `ColumnFilterItem[]` | which column groups are shown |
 | `selectedCells` | `{ active, ranges }` | controlled selection |
+| `selectedRows` | `{ all: false, ids } \| { all: true, except }` | checked rows |
+| `columnOrder` | `string[]` | column fields in display order |
 
 #### Events
 
@@ -657,6 +718,9 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 | `onSelectionChange` | `{ active, ranges, text, rows, cols, cells }` |
 | `onCopy` | `{ ok, cells, rows, cols, ms, reason? }` |
 | `onColumnResize` | `{ column, key, width }`, when the user lets go |
+| `onColumnOrderChange` | fields in their new order, after a drag |
+| `onRowSelectionChange` | `{ all, ids }` or `{ all, except }` |
+| `onCellClick`, `onCellDoubleClick`, `onCellContextMenu` | the cell's context plus `key` and `event` ([cell events](#cell-events)) |
 | `onViewChange` | `{ what, pending, progress? }` while a sort or filter runs, then `{ what, ok, rows, reason? }` or `{ what, cancelled: true }` |
 | `onError` | `(error, { kind: 'layout' \| 'cells' \| 'labels' })`; errors are logged when this is not set |
 | `onReady` | `(grid)` once the grid is drawn |
@@ -674,6 +738,8 @@ The same props work in a `columns` array.
 | `align` | `'start' \| 'end' \| 'center'` | |
 | `filter` | see [sorting and filtering](#sorting-and-filtering) | |
 | `sortable`, `resizable`, `hidden` | `boolean` | |
+| `pinned` | `boolean` | stays at the start while scrolling sideways |
+| `reorderable` | `boolean` | `false`: cannot be dragged elsewhere |
 | `group` | `string` | group name for the column chooser |
 | `format` | `(value, ctx) => string` | text shown in the cell |
 | `cellClass` | `(value, ctx) => string` | a class per cell |
@@ -691,6 +757,9 @@ What the `ref` gives you.
 |---|---|
 | `scrollToCell(row, col?)` | bring a cell into view |
 | `refresh()` | reload the visible data (it changed on the server) |
+| `getRow(rowIndex)` | the record behind a visible row, when loaded |
+| `getRowSelection()`, `setRowSelection(sel)` | checked rows |
+| `getColumnOrder()`, `setColumnOrder(fields)` | column order |
 | `getQuery()`, `getSort()`, `getFilter()`, `getColumnFilter()` | the current sort and filters |
 | `setSort(sort)`, `setFilter(filter)`, `setColumnFilter(list)` | change uncontrolled state; resolve to `false` if refused |
 | `toggleSort(field, additive?)` | what a header click does |
@@ -712,7 +781,7 @@ What the `ref` gives you.
 | `useDataSource(callbacks, deps)` | a data source from callbacks; when `deps` change, the grid reloads in place |
 | `useArraySource(rows, options)` | an in-memory data source you can share or pass as `dataSource` |
 | `createColumnHelper<Row>()` | typed column definitions ([TypeScript](#typescript)) |
-| `createArraySource`, `createHttpSource` | the [ready-made sources](https://github.com/borealjs/grid/tree/main/packages/grid-core#ready-made-sources) from the core package |
+| `createArraySource`, `createRowSource`, `createHttpSource` | the [ready-made sources](https://github.com/borealjs/grid/tree/main/packages/grid-core#ready-made-sources) from the core package |
 
 ## FAQ
 

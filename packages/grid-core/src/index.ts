@@ -10,6 +10,7 @@ export type * from './types.js';
 // Data sources
 export { createArraySource, compareValues, type ArraySource, type ArraySourceOptions, type FilterFn } from './sources/array.js';
 export { createHttpSource, type HttpSourceOptions } from './sources/http.js';
+export { createRowSource, type RowSource, type RowSourceOptions } from './sources/rows.js';
 
 // Low-level pieces, for custom layouts and tooling. These may change in any release.
 export { GridEngine, type EngineOptions, type FetchContext, type DrawnWindow } from './engine/engine.js';

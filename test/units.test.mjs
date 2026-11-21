@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TreeAxis, UniformAxis, ResizableAxis, createTableModel, EMPTY_QUERY } from '../packages/grid-core/src/index.ts';
 import { MergeIndex, mergePieces, normalizeMerge } from '../packages/grid-core/src/engine/merges.ts';
-import { cellRange, spanRange, inRanges, cellCount } from '../packages/grid-core/src/engine/selection.ts';
+import { cellRange, rangeOf, isActiveOnly, inRanges, cellCount } from '../packages/grid-core/src/engine/selection.ts';
 import { buildCopy, coalesceRects, batchRects, planCopy, tsvField } from '../packages/grid-core/src/engine/clipboard.ts';
 import { lookupCell, classifyRuns, labelKey, parseLabelKey } from '../packages/grid-core/src/engine/blocks.ts';
 import { sortParamOf, filterParamOf, viewKeyId, parseViewKeyId } from '../packages/grid-core/src/query.ts';
@@ -84,10 +84,15 @@ test('merges: validation, priority, and splitting around collapsed items', () =>
   assert.equal(cover[1 * 4 + 0], 0);
 });
 
-test('selection geometry grows ranges over merged cells', () => {
+test('selection geometry: a merged cell is one cell, ranges stay as drawn', () => {
   const pieces = [{ key: 'm', merge: {}, vr0: 2, vr1: 4, vc0: 1, vc1: 2 }];
   assert.deepEqual(cellRange(pieces, { r: 3, c: 2 }), { r0: 2, c0: 1, r1: 4, c1: 2 });
-  assert.deepEqual(spanRange(pieces, { r: 0, c: 0 }, { r: 3, c: 1 }), { r0: 0, c0: 0, r1: 4, c1: 2 });
+  // A range that only touches a merged cell does not grow to cover it.
+  assert.deepEqual(rangeOf({ r: 3, c: 1 }, { r: 0, c: 0 }), { r0: 0, c0: 0, r1: 3, c1: 1 });
+  // The clicked cell inside a merged cell, or the whole merged cell, counts as just the active cell.
+  assert.ok(isActiveOnly(pieces, { r0: 3, c0: 2, r1: 3, c1: 2 }, { r: 3, c: 2 }));
+  assert.ok(isActiveOnly(pieces, { r0: 2, c0: 1, r1: 4, c1: 2 }, { r: 3, c: 2 }));
+  assert.ok(!isActiveOnly(pieces, { r0: 2, c0: 1, r1: 3, c1: 2 }, { r: 3, c: 2 }));
   assert.ok(inRanges([{ r0: 0, c0: 0, r1: 1, c1: 1 }], 1, 1));
   assert.equal(cellCount([{ r0: 0, c0: 0, r1: 1, c1: 2 }, { r0: 5, c0: 5, r1: 5, c1: 5 }]), 7);
 });
@@ -149,4 +154,41 @@ test('table model: hidden columns, groups, keys and filter descriptions', async 
   await model.applyView({ sort: '', filter: '', colfilter: JSON.stringify([{ dim: 0, op: 'in', v: ['Info'] }]), query: EMPTY_QUERY });
   assert.deepEqual([0, 1].map((c) => model.colSource(c)), [0, 3]);
   assert.equal(model.cols.count, 2);
+});
+
+test('table model: column order, pinned columns first, row checkbox band', () => {
+  const columns = [
+    { key: 'a' }, { key: 'b', pinned: true }, { key: 'c', hidden: true }, { key: 'd' }, { key: 'e', pinned: true, width: 50 },
+  ];
+  const source = { getCells: () => [], getLayout: () => ({ rowCount: 3 }) };
+  const model = createTableModel({ columns, columnOrder: ['d', 'a'], rowSelection: true }, { rowCount: 3 }, source);
+  // Pinned b and e come first (in their order), then d, a; hidden c is skipped.
+  assert.deepEqual(Array.from({ length: model.cols.count }, (_, i) => model.colSource(i)), [1, 4, 3, 0]);
+  assert.equal(model.pinnedCols(), 2);
+  assert.deepEqual(model.columnOrder(), [1, 4, 3, 0, 2]);
+  assert.equal(model.cols.base.fromSource(0), 3);
+  assert.equal(model.cols.base.fromSource(2), -1);
+  // Widths follow their column, whatever its place.
+  assert.equal(model.cols.sizeOf(1), 50);
+  model.setColumnOrder([0, 3, 2, 1, 4]);
+  assert.deepEqual(Array.from({ length: model.cols.count }, (_, i) => model.colSource(i)), [1, 4, 0, 3]);
+  assert.equal(model.rowBands[0].width, 88);
+  const noNumbers = createTableModel({ columns, rowHeader: false, rowSelection: true }, { rowCount: 3 }, source);
+  assert.equal(noNumbers.rowBands[0].width, 40);
+  assert.equal(createTableModel({ columns, rowHeader: false }, { rowCount: 3 }, source).rowBands.length, 0);
+});
+
+test('table model: row sources load the first page of a new sort with progress', async () => {
+  const calls = [];
+  const source = {
+    layoutOnSort: true,
+    getCells: () => [],
+    getLayout: ({ query, onProgress }) => { calls.push(query.sort.length); onProgress?.({ done: 1, total: 1 }); return { rowCount: 7 }; },
+  };
+  const model = createTableModel({ columns: [{ key: 'a' }] }, { rowCount: 7 }, source);
+  const progress = [];
+  await model.applyView({ sort: '0:a', filter: '', colfilter: '', query: { sort: [{ column: 0, direction: 'asc' }], filter: [], columnFilter: [] }, onProgress: (p) => progress.push(p) });
+  await model.applyView({ sort: '0:a', filter: '', colfilter: '', query: { sort: [{ column: 0, direction: 'asc' }], filter: [], columnFilter: [] } });
+  assert.deepEqual(calls, [1]);
+  assert.equal(progress.length, 1);
 });

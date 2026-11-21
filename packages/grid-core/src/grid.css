@@ -439,3 +439,52 @@
 }
 .vg-filter-cancel { margin-right: auto; }
 .vg-filter-cancel[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ pinned columns */
+
+.vg-pinbody {
+  left: var(--vg-rh-w);
+  right: auto;
+  width: var(--vg-pin-w, 0);
+  background: var(--vg-bg);
+  box-shadow: 1px 0 0 var(--vg-line), 4px 0 6px -4px rgb(0 0 0 / 0.18);
+}
+.vg-pinhead {
+  right: auto;
+  width: var(--vg-pin-w, 0);
+  box-shadow: 1px 0 0 var(--vg-line), 4px 0 6px -4px rgb(0 0 0 / 0.18);
+}
+.vg-pinbody[hidden], .vg-pinhead[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ column drag */
+
+.vg-colhead .vg-seg[data-move] { cursor: grab; }
+.vg-moving, .vg-moving * { cursor: grabbing !important; }
+.vg-seg.vg-dragging { opacity: 0.55; }
+.vg-dropline {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--vg-accent);
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* ------------------------------------------------------------------ row checkboxes */
+
+.vg-check {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0;
+  accent-color: var(--vg-accent);
+  cursor: pointer;
+}
+.vg-check[hidden] { display: none; }
+.vg-cn-check { padding-left: 32px; }
+.vg-row.vg-checked > .vg-cell { background: var(--vg-sel-fill); }
+.vg-seg.vg-checked { color: var(--vg-accent); }

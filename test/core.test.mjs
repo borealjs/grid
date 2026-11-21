@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createArraySource, createHttpSource, compareValues, EMPTY_QUERY } from '../packages/grid-core/dist/index.js';
+import { createArraySource, createHttpSource, createRowSource, compareValues, EMPTY_QUERY } from '../packages/grid-core/dist/index.js';
 import { sortFromPublic, sortToPublic, filterFromPublic, filterToPublic, columnFilterFromPublic, columnFilterToPublic } from '../packages/grid-core/src/query.ts';
 
 const rows = [
@@ -160,4 +160,66 @@ test('http source reports progress of a slow filter and can cancel it', async (t
     await new Promise((r) => setTimeout(r, 100));
   }
   assert.equal(progress.active, false);
+});
+
+test('array source: indexOfRow finds a row in the sorted / filtered view', async () => {
+  const src = createArraySource(rows, { columns });
+  const byId = (row) => row.id;
+  const sorted = q({ sort: [{ column: 1, key: 'name', direction: 'asc' }] });
+  assert.equal(await src.indexOfRow(2, sorted, byId), 1); // Item 1, item 2, Item 3, Item 10
+  assert.equal(await src.indexOfRow(1, sorted, byId), 3);
+  assert.equal(await src.indexOfRow(2, q({ filter: [{ column: 2, key: 'city', op: 'in', values: ['Oslo'] }] }), byId), -1);
+});
+
+test('row source: pages by offset / limit, cells by key, shared requests, row lookup', async () => {
+  const data = Array.from({ length: 250 }, (_, i) => ({ id: `r${i}`, n: i, label: `Row ${i}` }));
+  const calls = [];
+  const src = createRowSource({
+    pageSize: 100,
+    columns: [{ key: 'label' }, { key: 'n' }, { key: 'twice', value: (row) => row.n * 2 }],
+    async getRows({ offset, limit, sort, filter }) {
+      calls.push([offset, limit, sort.length, filter.length]);
+      await new Promise((r) => setTimeout(r, 5));
+      const list = filter.length ? data.filter((d) => d.n % 2 === 0) : data;
+      return { rows: list.slice(offset, offset + limit), total: list.length };
+    },
+  });
+  const query = q();
+  assert.deepEqual(await src.getLayout({ query }), { rowCount: 250, totalRowCount: 250, columnCount: 3 });
+  // Two calls asking for the same pages share one request each.
+  const rect = { row: 95, col: 0, rowCount: 10, colCount: 3 };
+  const [a, b] = await Promise.all([src.getCells({ rects: [rect], query }), src.getCells({ rects: [rect], query })]);
+  assert.deepEqual(a, b);
+  assert.deepEqual(a[0].slice(0, 3), ['Row 95', 95, 190]);
+  assert.deepEqual(calls, [[0, 100, 0, 0], [100, 100, 0, 0]]);
+  // Records are known once loaded (cell renderers get ctx.row), and ids can be found among them.
+  assert.equal(src.rowAt(104, query).id, 'r104');
+  assert.equal(src.rowAt(240, query), undefined);
+  assert.equal(await src.indexOfRow('r150', query, (row) => row.id), 150);
+  assert.equal(await src.indexOfRow('r240', query, (row) => row.id), -1);
+  // A filtered view has its own pages and keeps the unfiltered total.
+  const filtered = q({ filter: [{ key: 'n', op: 'even' }] });
+  assert.deepEqual(await src.getLayout({ query: filtered }), { rowCount: 125, totalRowCount: 250, columnCount: 3 });
+  src.clearCache();
+  assert.equal(src.rowAt(104, query), undefined);
+});
+
+test('row source: a page request is aborted only when every caller gave up', async () => {
+  let aborted = 0;
+  const src = createRowSource({
+    columns: ['n'],
+    getRows: ({ signal }) => new Promise((resolve, reject) => {
+      const t = setTimeout(() => resolve({ rows: [{ n: 1 }], total: 1 }), 30);
+      signal.addEventListener('abort', () => { aborted++; clearTimeout(t); reject(new Error('aborted')); });
+    }),
+  });
+  const one = new AbortController();
+  const two = new AbortController();
+  const rect = { row: 0, col: 0, rowCount: 1, colCount: 1 };
+  const p1 = src.getCells({ rects: [rect], query: q(), signal: one.signal });
+  const p2 = src.getCells({ rects: [rect], query: q(), signal: two.signal });
+  one.abort();
+  await assert.rejects(p1);
+  assert.equal(aborted, 0);
+  assert.deepEqual(await p2, [[1]]);
 });

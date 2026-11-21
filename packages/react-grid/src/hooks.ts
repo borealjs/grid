@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react';
 import { createArraySource, type ArraySource, type DataSource } from '@borealjs/grid-core';
 import type { ColumnDef, FilterFns } from './types.js';
 
-const SOURCE_METHODS = ['getCells', 'getLayout', 'getLabels', 'getFilterValues', 'rowAt'] as const satisfies readonly (keyof DataSource)[];
+const SOURCE_METHODS = ['getRows', 'getCells', 'getLayout', 'getLabels', 'getFilterValues', 'rowAt', 'indexOfRow', 'clearCache'] as const satisfies readonly (keyof DataSource)[];
 const SOURCE_LIMITS = ['maxRectsPerRequest', 'maxCellsPerRequest'] as const satisfies readonly (keyof DataSource)[];
 
 /** A data source made by useDataSource: `version` moves when its dependencies change. */
@@ -13,8 +13,10 @@ export type ReactDataSource = DataSource & { version: number };
  * is not rebuilt); when `deps` change, the grid reloads what is visible, keeping scroll, sort and filter.
  *
  *   const source = useDataSource({
- *     getLayout: async ({ query, signal }) => ({ rowCount: await api.count(search, query, signal) }),
- *     getCells: ({ rects, query, signal }) => api.cells(search, rects, query, signal),
+ *     getRows: async ({ offset, limit, sort, filter, signal }) => {
+ *       const res = await fetch(`/api/orders?offset=${offset}&limit=${limit}&q=${search}`, { signal });
+ *       return res.json(); // { rows: [...], total: 1234 }
+ *     },
  *   }, [search]);
  */
 export function useDataSource(spec: DataSource, deps: readonly unknown[] = []): ReactDataSource {

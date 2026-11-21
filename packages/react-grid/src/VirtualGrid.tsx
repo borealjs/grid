@@ -18,17 +18,20 @@ type Props = VirtualGridProps<any>;
 /** Event callbacks: stable wrappers that call the latest prop. */
 const CALLBACKS = [
   'onSortChange', 'onFilterChange', 'onColumnFilterChange', 'onSelectionChange', 'onCopy', 'onError', 'onViewChange', 'onColumnResize', 'onReady',
+  'onRowSelectionChange', 'onCellClick', 'onCellDoubleClick', 'onCellContextMenu', 'onColumnOrderChange',
 ] as const satisfies readonly (keyof Props & keyof GridOptions)[];
 /** Props passed to the core as they are. */
 const PASS = [
   'layout', 'rowCount', 'columnCount', 'rowHeight', 'headerHeight', 'columnWidth', 'minColumnWidth',
   'columnChooser', 'columnGroups', 'theme', 'sortable', 'filterable', 'resizable', 'multiSort', 'expandable',
   'selection', 'copy', 'keyboard', 'notices', 'defaultSort', 'defaultFilter', 'defaultColumnFilter', 'blockRows', 'blockCols',
-  'rowHeaderWidths', 'model', 'isMac',
+  'rowHeaderWidths', 'model', 'isMac', 'rowSelection', 'reorderable',
 ] as const satisfies readonly (keyof Props & keyof GridOptions)[];
 /** Object props compared shallowly, so inline objects do not rebuild the grid. */
 const OBJECTS = ['rowHeader', 'messages'] as const satisfies readonly (keyof Props & keyof GridOptions)[];
 const QUERY = ['sort', 'filter', 'columnFilter'] as const satisfies readonly (keyof Props & keyof GridOptions)[];
+/** Array / object props compared by content (a new array with the same items is no change). */
+const BY_CONTENT = ['selectedRows', 'columnOrder'] as const satisfies readonly (keyof Props & keyof GridOptions)[];
 
 const shallowEqual = (a: unknown, b: unknown): boolean => {
   if (a === b) return true;
@@ -88,6 +91,10 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
     () => Object.fromEntries(CALLBACKS.map((k) => [k, (...args: unknown[]) => (propsRef.current[k] as ((...a: unknown[]) => void) | undefined)?.(...args)])),
     [],
   );
+  // Only callbacks that are set count as handlers (a cell click handler changes how clicks behave).
+  const handlers = Object.fromEntries(CALLBACKS.map((k) => [k, props[k] ? callbacks[k] : undefined]));
+  const hasRowId = typeof props.getRowId === 'function';
+  const getRowId = useMemo(() => (hasRowId ? (row: unknown) => propsRef.current.getRowId!(row as never) : undefined), [hasRowId]);
   // sortable / filterable may be functions of the column or level: keep them stable like the hooks.
   const isFn = (k: 'sortable' | 'filterable') => typeof props[k] === 'function';
   const rules = useMemo(() => ({
@@ -105,7 +112,10 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
     columns,
     getColumn,
     ...hooks,
-    ...callbacks,
+    ...handlers,
+    getRowId,
+    selectedRows: props.selectedRows,
+    columnOrder: props.columnOrder,
     // Controlled when the prop is given: the grid reports changes and waits for the new prop.
     sort: props.sort,
     filter: props.filter,
@@ -142,6 +152,7 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
     const next = { ...optionsRef.current } as Record<string, unknown> & GridOptions;
     // Controlled queries compare by content (a new array with the same items is no change).
     for (const k of QUERY) if (next[k] !== undefined && sameJson(next[k], grid.getQuery()[k])) next[k] = prev[k] as never;
+    for (const k of BY_CONTENT) if (sameJson(next[k], prev[k])) next[k] = prev[k] as never;
     if (shallowEqual(next.controlled, prev.controlled)) next.controlled = prev.controlled;
     grid.setOptions(next).catch(() => {});
   });

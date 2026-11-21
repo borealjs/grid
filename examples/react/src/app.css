@@ -137,3 +137,17 @@ mark { background: #fde68a; color: #1d2330; border-radius: 2px; }
   .main { flex-direction: column; }
   .options { width: auto; max-height: 45%; border-left: 0; border-top: 1px solid var(--line); }
 }
+
+/* Custom backend tab: detail panel and context menu */
+.split { display: flex; flex: 1; min-height: 0; gap: 0; }
+.split > .grid { flex: 1; min-width: 0; }
+.detail { width: 260px; border-left: 1px solid var(--line, #d9dde3); padding: 12px 16px; overflow: auto; }
+.detail header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.detail header button { border: 0; background: none; font-size: 18px; cursor: pointer; color: inherit; }
+.detail dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; }
+.detail dt { color: var(--muted, #6b7280); }
+.detail dd { margin: 0; }
+.menu { position: fixed; z-index: 50; list-style: none; margin: 0; padding: 4px; min-width: 200px; background: var(--bg, #fff); color: inherit; border: 1px solid var(--line, #d9dde3); border-radius: 8px; box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); }
+.menu button { display: block; width: 100%; text-align: left; padding: 6px 10px; border: 0; background: none; color: inherit; border-radius: 4px; cursor: pointer; font: inherit; }
+.menu button:hover { background: var(--hover, rgb(127 127 127 / 0.15)); }
+.vg .link-btn { border: 0; background: none; color: var(--vg-accent); cursor: pointer; padding: 0; margin: 0; height: auto; line-height: inherit; font: inherit; box-shadow: none; }

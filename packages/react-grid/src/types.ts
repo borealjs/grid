@@ -1,13 +1,20 @@
 import type { CSSProperties, ReactNode, Ref } from 'react';
 import type {
   CellContext as CoreCellContext, ColumnDef as CoreColumnDef, CustomFilterApi, DataSource, EmptyContext, Grid, GridOptions, HeaderContext,
-  SelectionRange,
+  RowId, SelectionRange,
 } from '@borealjs/grid-core';
 
 /** What renderCell / format / cellClass receive. `row` is the record for in-memory rows (undefined for servers). */
 export interface CellContext<Row = any, V = unknown> extends Omit<CoreCellContext<V>, 'column' | 'row'> {
   readonly row: Row | undefined;
   column?: ColumnDef<Row>;
+}
+
+/** A click, double-click or context menu on a cell: its context (with the row) plus the DOM event. */
+export interface CellEvent<Row = any, V = unknown> extends CellContext<Row, V> {
+  /** The column's field. */
+  key?: string;
+  event: MouseEvent | KeyboardEvent;
 }
 
 /** A custom filter rendered by React inside the grid's filter dialog; Apply sends { op, value }. */
@@ -50,7 +57,8 @@ export interface SelectedCells {
 }
 
 export interface VirtualGridProps<Row = any>
-  extends Omit<GridOptions, 'ariaLabel' | 'dataSource' | 'columns' | 'getColumn' | 'renderCell' | 'renderHeader' | 'renderEmpty' | 'format' | 'cellClass' | 'controlled'> {
+  extends Omit<GridOptions, 'ariaLabel' | 'dataSource' | 'columns' | 'getColumn' | 'renderCell' | 'renderHeader' | 'renderEmpty' | 'format' | 'cellClass' | 'controlled'
+    | 'getRowId' | 'onCellClick' | 'onCellDoubleClick' | 'onCellContextMenu'> {
   /** In-memory data (sorted, filtered and searched in the browser). New arrays update the grid in place. */
   rows?: readonly Row[];
   /** Or any data source (your backend: see useDataSource). */
@@ -69,6 +77,12 @@ export interface VirtualGridProps<Row = any>
   /** Shown when there are no rows (`filtered`: because of a filter). */
   emptyState?: ReactNode | ((ctx: EmptyContext) => ReactNode);
   selectedCells?: SelectedCells;
+  /** A row's stable id: the selection follows rows through sorts, filters and new data; checked rows are kept by id. */
+  getRowId?(row: Row): RowId;
+  onCellClick?(e: CellEvent<Row>): void;
+  onCellDoubleClick?(e: CellEvent<Row>): void;
+  /** Right click or the context-menu key. Call e.event.preventDefault() to show your own menu. */
+  onCellContextMenu?(e: CellEvent<Row>): void;
   className?: string;
   style?: CSSProperties;
   id?: string;

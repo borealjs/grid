@@ -15,10 +15,20 @@ export class ColumnsAxis implements Axis {
   constructor(
     readonly sourceCount: number,
     widthOf: ((src: number) => number) | null,
-    /** Source indexes of the visible columns, ascending; null = every column. */
+    /** Source indexes of the visible columns, in display order; null = every column. */
     readonly visible: Int32Array | null,
   ) {
     this.count = visible ? visible.length : sourceCount;
+    if (visible) {
+      for (let i = 1; i < visible.length; i++) {
+        if (visible[i] <= visible[i - 1]) {
+          // Reordered: binary search no longer works, keep a source -> visible map.
+          this.#reverse = new Int32Array(sourceCount).fill(-1);
+          for (let k = 0; k < visible.length; k++) this.#reverse[visible[k]] = k;
+          break;
+        }
+      }
+    }
     if (widthOf) {
       const offsets = new Float64Array(this.count + 1);
       let min = Infinity;
@@ -41,10 +51,13 @@ export class ColumnsAxis implements Axis {
     return axis;
   }
 
+  #reverse: Int32Array | null = null;
+
   sourceOf(i: number): number { return this.visible ? this.visible[i] : i; }
 
   fromSource(src: number): number {
     if (!this.visible) return src >= 0 && src < this.sourceCount ? src : -1;
+    if (this.#reverse) return src >= 0 && src < this.sourceCount ? this.#reverse[src] : -1;
     let lo = 0;
     let hi = this.visible.length - 1;
     while (lo <= hi) {

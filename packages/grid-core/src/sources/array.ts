@@ -169,6 +169,12 @@ export function createArraySource<R = any>(rows: R[], { columns, filterFns = {},
       const idx = view(query);
       return data[idx ? idx[position] : position];
     },
+    indexOfRow(id, query, getRowId) {
+      const idx = view(query);
+      const n = idx ? idx.length : data.length;
+      for (let i = 0; i < n; i++) if (getRowId(data[idx ? idx[i] : i]) === id) return i;
+      return -1;
+    },
     async getLayout({ query }): Promise<TableLayout> {
       const idx = view(query);
       return { rowCount: idx ? idx.length : data.length, totalRowCount: data.length, columnCount: accessors.length };

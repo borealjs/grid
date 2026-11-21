@@ -5,13 +5,14 @@
 import { GridEngine, type BlockPayload, type GatherPayload } from './engine/engine.js';
 import { createPivotModel } from './model/pivot.js';
 import { createTableModel } from './model/table.js';
+import { createRowSource, type RowSource } from './sources/rows.js';
 import type { GridModel } from './model/types.js';
 import {
   columnFilterFromPublic, columnFilterToPublic, filterFromPublic, filterParamOf, filterToPublic, sortFromPublic, sortToPublic, type ViewKey,
 } from './query.js';
 import type {
   CellRect, CellsResult, ColumnFilterItem, CopyInfo, DataSource, ErrorContext, FilterItem, GridOptions, GridStats, Layout, Merge, PivotLayout,
-  PivotLevels, Query, Selection, SelectionInfo, SelectionRange, SortItem, TableLayout, Theme, VisibleRange,
+  PivotLevels, Query, RowId, RowSelection, Selection, SelectionInfo, SelectionRange, SortItem, TableLayout, Theme, VisibleRange,
 } from './types.js';
 
 type OptionKey = keyof GridOptions;
@@ -19,12 +20,15 @@ type OptionKey = keyof GridOptions;
 /** Event callbacks: always called in their latest version, so changing them never rebuilds. */
 const CALLBACKS = [
   'onSortChange', 'onFilterChange', 'onColumnFilterChange', 'onSelectionChange', 'onCopy', 'onError', 'onViewChange', 'onColumnResize', 'onReady',
+  'onRowSelectionChange', 'onCellClick', 'onCellDoubleClick', 'onCellContextMenu', 'onColumnOrderChange',
 ] as const satisfies readonly OptionKey[];
 /** Cell / header hooks: changing them redraws (adding or removing one rebuilds). */
 const HOOKS = ['format', 'cellClass', 'renderCell', 'renderHeader', 'renderEmpty', 'rowClass'] as const satisfies readonly OptionKey[];
 const QUERY_KEYS = ['sort', 'filter', 'columnFilter'] as const satisfies readonly OptionKey[];
 /** Options applied in place, without a rebuild. */
-const LIVE_KEYS = new Set<OptionKey>([...CALLBACKS, ...HOOKS, ...QUERY_KEYS, 'theme', 'controlled', 'ariaLabel', 'defaultSort', 'defaultFilter', 'defaultColumnFilter']);
+const LIVE_KEYS = new Set<OptionKey>([
+  ...CALLBACKS, ...HOOKS, ...QUERY_KEYS, 'theme', 'controlled', 'ariaLabel', 'defaultSort', 'defaultFilter', 'defaultColumnFilter', 'selectedRows', 'columnOrder', 'getRowId',
+]);
 const THEMES: readonly Theme[] = ['auto', 'light', 'dark'];
 const MAX_SORT_KEYS = 4;
 
@@ -56,12 +60,16 @@ export function createGrid<V = unknown>(host: HTMLElement, options: GridOptions<
   return new Grid(host, options);
 }
 
-/** What a rebuild keeps: scroll position and query. */
+/** What a rebuild keeps: scroll position, query, column order and checked rows. */
 interface Kept {
   vx: number;
   vy: number;
   query: Query;
+  columnOrder?: (string | number)[];
+  rowSelection?: RowSelection;
 }
+
+const isRowSource = (s: unknown): s is RowSource => !!s && typeof (s as RowSource).setColumns === 'function' && 'hasColumns' in (s as object);
 
 export class Grid {
   /** Resolves when the first layout is in and the grid is drawn (again after a rebuild). */
@@ -72,10 +80,14 @@ export class Grid {
   #destroyed = false;
   #buildSeq = 0;
   #theme: Theme = 'auto';
+  #source: Partial<DataSource> = {};
+  /** `{ getRows }` sources get a row source around them (kept per object, so its cache survives rebuilds). */
+  readonly #wrapped = new WeakMap<object, RowSource>();
 
   constructor(host: HTMLElement, options: GridOptions<any>) {
     if (!host || typeof host.appendChild !== 'function') throw new TypeError('createGrid: the first argument must be an element');
-    if (!options?.model && typeof options?.dataSource?.getCells !== 'function') throw new TypeError('createGrid: `dataSource.getCells` is required');
+    const ds = options?.dataSource;
+    if (!options?.model && typeof ds?.getCells !== 'function' && typeof ds?.getRows !== 'function') throw new TypeError('createGrid: the data source needs `getRows` or `getCells`');
     this.#host = host;
     this.#opts = { ...options };
     this.ready = this.#build();
@@ -90,7 +102,8 @@ export class Grid {
   async #build(keep?: Kept): Promise<void> {
     const seq = ++this.#buildSeq;
     const o = this.#opts;
-    const source: Partial<DataSource> = o.dataSource ?? {};
+    const source = this.#resolveSource();
+    this.#source = source;
     const keyIndex = Array.isArray(o.columns) ? new Map(o.columns.map((d, i) => [d.key, i])) : null;
     const colOfKey = (k: string | undefined) => keyIndex?.get(k) ?? -1;
     const keyOf = (c: number) => (Array.isArray(o.columns) ? o.columns[c]?.key : undefined);
@@ -114,9 +127,11 @@ export class Grid {
         }
       }
       if (seq !== this.#buildSeq || this.#destroyed) return;
+      const modelOptions = this.#hookOptions();
+      if (keep?.columnOrder) modelOptions.columnOrder = keep.columnOrder;
       model = isPivotLayout(layout)
-        ? createPivotModel(layout, source as DataSource, this.#hookOptions(), params)
-        : createTableModel(this.#hookOptions(), layout as TableLayout, source as DataSource, params);
+        ? createPivotModel(layout, source as DataSource, modelOptions, params)
+        : createTableModel(modelOptions, layout as TableLayout, source as DataSource, params);
     }
     if (seq !== this.#buildSeq || this.#destroyed) return;
 
@@ -124,6 +139,11 @@ export class Grid {
     this.#theme = THEMES.includes(o.theme as Theme) ? (o.theme as Theme) : 'auto';
     const latest = <K extends OptionKey>(name: K) => (...args: unknown[]) => (this.#opts[name] as ((...a: unknown[]) => unknown) | undefined)?.(...args);
     const getCells = async (rects: CellRect[], query: Query, signal?: AbortSignal) => normalizeCells(await source.getCells!({ rects, query, signal }), rects);
+    // Row ids: getRowId, or (in-memory rows) the row object itself.
+    const inMemory = Array.isArray((source as { rows?: unknown }).rows) && typeof source.rowAt === 'function';
+    const getRowId = typeof o.getRowId === 'function' ? (row: unknown) => this.#opts.getRowId!(row) : inMemory ? (row: unknown) => row as RowId : undefined;
+    const currentQuery = () => this.#engine?.query ?? initialQuery;
+    const keyOfSource = (s: number) => this.#engine?.model.keyOf?.(s) ?? keyOf(s) ?? s;
     const canGather = (source.maxRectsPerRequest ?? 400) > 1;
     const engine = new GridEngine(this.#host, {
       model,
@@ -155,9 +175,19 @@ export class Grid {
       renderHeader: o.renderHeader && ((el, ctx) => this.#opts.renderHeader?.(el, ctx)),
       renderEmpty: o.renderEmpty && ((el, ctx) => this.#opts.renderEmpty?.(el, ctx)),
       // The data record behind a row, for cell renderers (in-memory sources can tell; servers usually not).
-      rowAt: typeof source.rowAt === 'function' ? (position) => source.rowAt!(position, this.#engine?.query ?? initialQuery) : undefined,
+      rowAt: typeof source.rowAt === 'function' ? (position) => source.rowAt!(position, currentQuery()) : undefined,
+      rowId: getRowId && typeof source.rowAt === 'function'
+        ? (position) => {
+          const row = source.rowAt!(position, currentQuery());
+          return row === undefined || row === null ? undefined : getRowId(row);
+        }
+        : undefined,
+      findRow: getRowId && typeof source.indexOfRow === 'function' ? (id) => source.indexOfRow!(id, currentQuery(), getRowId) : undefined,
+      rowSelection: !!o.rowSelection,
+      hasHandler: (name) => typeof this.#opts[name] === 'function',
       ...(Object.fromEntries(CALLBACKS.map((n) => [n, latest(n)])) as Pick<GridOptions, (typeof CALLBACKS)[number]>),
       onError: (err, ctx) => this.#error(err, ctx),
+      onColumnOrderChange: (order) => this.#opts.onColumnOrderChange?.(order.map(keyOfSource)),
       fetchBlock: async ({ r0, c0, nr, nc, signal, query }): Promise<BlockPayload> => {
         const out = await getCells([{ row: r0, col: c0, rowCount: nr, colCount: nc }], query, signal);
         return { cells: out.cells[0], merges: out.merges };
@@ -172,8 +202,36 @@ export class Grid {
       },
     });
     this.#engine = engine;
+    const checked = keep?.rowSelection ?? o.selectedRows;
+    if (checked) engine.setRowSelection(checked);
     if (keep) engine.scrollToVirtual(keep.vx, keep.vy);
     this.#opts.onReady?.(this);
+  }
+
+  /** The data source to use: `{ getRows }` gets a row source around it that reads cells by column key. */
+  #resolveSource(): Partial<DataSource> {
+    const o = this.#opts;
+    const src = o.dataSource as Partial<DataSource> | undefined;
+    if (!src) return {};
+    const columns = Array.isArray(o.columns) ? o.columns : (i: number) => o.getColumn?.(i) ?? {};
+    if (typeof src.getCells === 'function') {
+      if (isRowSource(src) && !src.hasColumns) src.setColumns(columns);
+      return src;
+    }
+    if (typeof src.getRows !== 'function') return src;
+    let wrapped = this.#wrapped.get(src);
+    if (!wrapped) {
+      wrapped = createRowSource({
+        getRows: (req) => src.getRows!(req),
+        getFilterValues: typeof src.getFilterValues === 'function' ? (req) => src.getFilterValues!(req) : undefined,
+        indexOfRow: typeof src.indexOfRow === 'function'
+          ? (id, query) => src.indexOfRow!(id, query, (row) => this.#opts.getRowId?.(row) as RowId)
+          : undefined,
+      });
+      this.#wrapped.set(src, wrapped);
+    }
+    wrapped.setColumns(columns);
+    return wrapped;
   }
 
   #error(err: unknown, ctx: ErrorContext): void {
@@ -206,7 +264,8 @@ export class Grid {
     this.#opts = { ...prev, ...next };
     const structural = changed.some((k) => !LIVE_KEYS.has(k));
     const hookPresence = changed.some((k) => (HOOKS as readonly OptionKey[]).includes(k) && typeof prev[k] !== typeof next[k]);
-    if (structural || hookPresence || !this.#engine) return this.rebuild();
+    const idPresence = changed.includes('getRowId') && typeof prev.getRowId !== typeof next.getRowId;
+    if (structural || hookPresence || idPresence || !this.#engine) return this.rebuild();
     const e = this.#engine;
     if (changed.includes('controlled')) e.o.controlled = this.#opts.controlled;
     if (changed.includes('ariaLabel')) {
@@ -221,6 +280,8 @@ export class Grid {
       e.o.theme = theme;
     }
     if (changed.some((k) => (HOOKS as readonly OptionKey[]).includes(k))) e.repaint();
+    if (changed.includes('selectedRows') && next.selectedRows) e.setRowSelection(next.selectedRows);
+    if (changed.includes('columnOrder') && Array.isArray(next.columnOrder)) e.setColumnOrder(next.columnOrder.map((k) => (typeof k === 'number' ? k : this.#colOfKey(k))));
     const tasks: Promise<boolean>[] = [];
     if (changed.includes('columnFilter')) tasks.push(this.setColumnFilter(next.columnFilter ?? []));
     if (changed.includes('filter')) tasks.push(this.setFilter(next.filter ?? []));
@@ -231,7 +292,7 @@ export class Grid {
   /** Build again from the current options (keeps the scroll position and the query). */
   rebuild(): Promise<void> {
     const e = this.#engine;
-    const keep = e ? { vx: e.vx, vy: e.vy, query: e.getQuery() } : undefined;
+    const keep = e ? { vx: e.vx, vy: e.vy, query: e.getQuery(), columnOrder: this.getColumnOrder(), rowSelection: e.getRowSelection() } : undefined;
     this.ready = this.#build(keep);
     return this.ready;
   }
@@ -291,8 +352,41 @@ export class Grid {
 
   // ---------------------------------------------------------------- data and drawing
 
-  /** Drop cached data and load what is visible again (call after the data changed). */
-  refresh(): Promise<void> { return this.#engine?.refresh() ?? this.ready; }
+  /**
+   * Drop cached data and load what is visible again (call after the data changed). With row ids the
+   * selection stays on its row.
+   */
+  refresh(): Promise<void> {
+    const e = this.#engine;
+    if (!e) return this.ready;
+    const snap = e.rowSnapshot();
+    this.#source.clearCache?.();
+    return e.refresh(snap);
+  }
+
+  /** The record behind a visible row, when the data source has it (in-memory rows, getRows pages loaded). */
+  getRow(rowIndex: number): unknown {
+    const e = this.#engine;
+    if (!e || typeof this.#source.rowAt !== 'function' || rowIndex < 0 || rowIndex >= e.rows.count) return undefined;
+    return this.#source.rowAt(e.rowSource(rowIndex), e.query);
+  }
+
+  /** Checked rows (rowSelection): { all: false, ids } or { all: true, except }. */
+  getRowSelection(): RowSelection { return this.#engine?.getRowSelection() ?? { all: false, ids: [] }; }
+
+  setRowSelection(selection: RowSelection): void { this.#engine?.setRowSelection(selection); }
+
+  /** Column order: keys (or source indexes for columns without a key). */
+  getColumnOrder(): (string | number)[] {
+    const e = this.#engine;
+    const order = e?.model.columnOrder?.();
+    if (!order) return [];
+    return order.map((s) => e!.model.keyOf?.(s) ?? s);
+  }
+
+  setColumnOrder(order: (string | number)[]): void {
+    this.#engine?.setColumnOrder(order.map((k) => (typeof k === 'number' ? k : this.#colOfKey(k))));
+  }
 
   /** Redraw cells and headers without reloading data. */
   repaint(): void { this.#engine?.repaint(); }

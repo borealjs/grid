@@ -68,29 +68,59 @@ export function createTableModel(options: ModelOptions, layout: TableLayout, sou
   const chooser = o.columnChooser ?? (!!list && list.some((d) => d.group !== undefined));
   const columnsLabel = () => o.messages?.columns ?? 'Columns';
 
+  // Display order (source indexes; only with a `columns` list). Pinned columns always come first.
+  const pinnedOf = (s: number) => !!list && !!list[s]?.pinned;
+  const normalizeOrder = (order: number[]): number[] => {
+    const seen = new Set<number>();
+    const out: number[] = [];
+    for (const s of order) if (Number.isInteger(s) && s >= 0 && s < sourceCount && !seen.has(s)) { seen.add(s); out.push(s); }
+    for (let s = 0; s < sourceCount; s++) if (!seen.has(s)) out.push(s);
+    return [...out.filter(pinnedOf), ...out.filter((s) => !pinnedOf(s))];
+  };
+  const orderFromOption = (): number[] | null => {
+    if (!list || !Array.isArray(o.columnOrder)) return null;
+    return o.columnOrder.map((k) => (typeof k === 'number' ? k : keyIndex?.get(k) ?? -1));
+  };
+  let order: number[] | null = list ? normalizeOrder(orderFromOption() ?? list.map((_, i) => i)) : null;
+  let pinned = 0;
+  let colFilterList: Condition[] = initial.colfilter ? JSON.parse(initial.colfilter) : [];
+
   function buildAxis(colFilters: Condition[]): ColumnsAxis {
     let visible: Int32Array | null = null;
     const hidden = list ? list.some((d) => d.hidden) : false;
-    if (hidden || colFilters.length) {
+    const reordered = !!order && order.some((s, i) => s !== i);
+    pinned = 0;
+    if (hidden || colFilters.length || reordered) {
       const out = new Int32Array(sourceCount);
       let n = 0;
-      for (let i = 0; i < sourceCount; i++) {
+      for (let k = 0; k < sourceCount; k++) {
+        const i = order ? order[k] : k;
         const d = defOf(i);
         if (d.hidden) continue;
         if (colFilters.length && !colFilters.every((f) => matchesName(f, d.group ?? ''))) continue;
+        if (pinnedOf(i)) pinned++;
         out[n++] = i;
       }
       visible = out.slice(0, n);
+    } else if (list) {
+      for (let i = 0; i < sourceCount && pinnedOf(i); i++) pinned++;
     }
     return widthOf ? new ColumnsAxis(sourceCount, widthOf, visible) : ColumnsAxis.uniform(sourceCount, defaultWidth, visible);
   }
 
-  const cols = new ResizableAxis(buildAxis(initial.colfilter ? JSON.parse(initial.colfilter) : []));
+  const cols = new ResizableAxis(buildAxis(colFilterList));
   const src = (c: number) => cols.base.sourceOf(c);
-  const rowHeader = o.rowHeader === false ? null : { width: 72, title: '#', ...(typeof o.rowHeader === 'object' ? o.rowHeader : {}) };
+  // Row checkboxes live in the row-number column; without row numbers they get a narrow column of their own.
+  const checks = !!o.rowSelection;
+  const rowHeader = o.rowHeader === false
+    ? (checks ? { width: 40, title: '', label: () => '' } : null)
+    : { width: checks ? 88 : 72, title: '#', ...(typeof o.rowHeader === 'object' ? o.rowHeader : {}) };
   const rowLabel = rowHeader?.label ?? ((r: number) => numberFormat.format(r + 1));
   const totalRows = layout.totalRowCount ?? layout.rowCount ?? o.rowCount ?? 0;
   let currentFilter = initial.filter ?? '';
+  // Row sources load the first page of a new sort through getLayout, so a slow server sort shows progress.
+  const layoutOnSort = !!(source as { layoutOnSort?: boolean }).layoutOnSort;
+  let currentSort: string | undefined;
   let currentColFilter = initial.colfilter ?? '';
   const titleOf = (s: number, label: LabelLookup): string | undefined => {
     const d = defOf(s);
@@ -132,6 +162,7 @@ export function createTableModel(options: ModelOptions, layout: TableLayout, sou
           label: titleOf(s, label),
           cls: `vg-colname${d.type === 'number' ? ' vg-end' : ''}${d.headerClass ? ` ${d.headerClass}` : ''}`,
           resizable: resizable(d),
+          movable: !!list && o.reorderable !== false && d.reorderable !== false,
           sort: sortable(d) ? { col: s } : undefined,
           filter: filterDesc(d) ? { col: s } : undefined,
           column: d,
@@ -198,17 +229,32 @@ export function createTableModel(options: ModelOptions, layout: TableLayout, sou
     },
     // Sorting keeps the row count; a filter changes it, so ask the data source how many rows match.
     // A column filter just changes which source columns are shown.
-    async applyView({ filter, colfilter = '', query, signal, onProgress }) {
+    async applyView({ sort, filter, colfilter = '', query, signal, onProgress }) {
+      const sortChanged = layoutOnSort && sort !== currentSort;
+      currentSort = sort;
+      if (sortChanged && filter === currentFilter && typeof source.getLayout === 'function') {
+        const res = (await source.getLayout({ query, signal, onProgress })) as TableLayout;
+        model.rows = new UniformAxis(res.rowCount, rowHeight);
+      }
       if (filter !== currentFilter) {
         const res = filter ? ((await source.getLayout!({ query, signal, onProgress })) as TableLayout) : { rowCount: model.totalRows };
         model.rows = new UniformAxis(res.rowCount, rowHeight);
         currentFilter = filter;
       }
       if (colfilter !== currentColFilter) {
-        cols.base = buildAxis(colfilter ? JSON.parse(colfilter) : []);
+        colFilterList = colfilter ? JSON.parse(colfilter) : [];
+        cols.base = buildAxis(colFilterList);
         cols.refresh();
         currentColFilter = colfilter;
       }
+    },
+    pinnedCols: () => pinned,
+    columnOrder: () => (order ? [...order] : Array.from({ length: sourceCount }, (_, i) => i)),
+    setColumnOrder(next) {
+      if (!list) return;
+      order = normalizeOrder(next);
+      cols.base = buildAxis(colFilterList);
+      cols.refresh();
     },
   };
   return model;

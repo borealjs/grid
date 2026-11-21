@@ -24,15 +24,17 @@
 
 - **Any size.** Smooth scrolling through billions of rows and millions of columns; only what is on screen is
   loaded.
-- **Any data.** An array in memory, or your backend through a few async callbacks (REST, GraphQL, SQL, a
-  worker).
+- **Any data.** An array in memory, or your backend: rows by offset / limit, as most REST, GraphQL and SQL
+  APIs serve them, or rectangles of cells for pivots and very wide tables.
 - **Sorting and filtering.** Multi-column sort; filters for ranges, dates, text and searchable value lists,
   plus your own.
 - **Pivots.** Grouped row and column headers, subtotals, expand and collapse.
 - **Spreadsheet feel.** Range selection, copy into Excel or Google Sheets, merged cells, full keyboard support.
+- **App essentials.** Pinned columns, drag-to-reorder columns, row checkboxes, stable row ids, cell click,
+  double-click and context-menu events.
 - **Yours to shape.** Custom cells, headers, filters and empty state; theme with CSS variables; dark mode;
   translations.
-- **Small.** About 34 kB gzipped, no dependencies, TypeScript types included.
+- **Small.** About 40 kB gzipped, no dependencies, TypeScript types included.
 
 ## Packages
 

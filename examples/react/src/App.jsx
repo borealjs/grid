@@ -130,6 +130,7 @@ function InMemoryDemo({ grid: gridProps }) {
   const [filter, setFilter] = useState([]); // controlled
   const [highlight, setHighlight] = useState('');
   const [selection, setSelection] = useState(null);
+  const [checked, setChecked] = useState({ all: false, ids: [] });
   const grid = useRef(null);
 
   return (
@@ -157,17 +158,22 @@ function InMemoryDemo({ grid: gridProps }) {
         filter={filter}
         onFilterChange={setFilter}
         onSelectionChange={setSelection}
+        getRowId={(row) => row.id}
+        rowSelection
+        selectedRows={checked}
+        onRowSelectionChange={setChecked}
         filterFns={{ atLeast: (value, min) => value >= min }}
         emptyState={({ filtered }) => (filtered
           ? <div className="empty">No customers match. <button type="button" onClick={() => setFilter([])}>Clear filters</button></div>
           : <div className="empty">No customers yet.</div>)}
         onError={(err) => console.error(err)}
       >
-        <Column field="id" title="ID" type="number" width={90} format={(v) => `#${v}`} />
+        <Column field="id" title="ID" type="number" width={90} pinned format={(v) => `#${v}`} />
         <Column
           field="name"
           title="Customer"
           width={200}
+          pinned
           renderHeader={(h) => <span className="hdr"><PersonIcon /> {h.label}</span>}
           renderCell={({ value }) => <Highlighted text={value} term={highlight} />}
         />
@@ -197,11 +203,17 @@ function InMemoryDemo({ grid: gridProps }) {
         <span>Sort: {sort.length ? describeSort(sort) : 'none'}</span>
         <span>Filter: {filter.length ? describeFilter(filter) : 'none'}</span>
         <span>{rows.length.toLocaleString()} rows loaded</span>
+        <span>{describeChecked(checked, rows.length)}</span>
         {selection && <span>Cell {selection.active.r + 1}, {selection.active.c + 1}: {selection.text ?? '…'}{selection.cells > 1 ? ` · ${selection.cells.toLocaleString()} cells` : ''}</span>}
       </footer>
     </section>
   );
 }
+
+const describeChecked = (sel, total) => {
+  const n = sel.all ? total - sel.except.length : sel.ids.length;
+  return n ? `${n.toLocaleString()} checked` : 'None checked';
+};
 
 // ------------------------------------------------------------------ custom backend (useDataSource)
 
@@ -225,48 +237,96 @@ const fakeApi = (() => {
       await delay(150, signal);
       return plan(term).count;
     },
-    async rows(term, start, n, signal) {
-      await delay(120, signal);
+    /** GET /orders?q=&offset=&limit= -> { rows, total }: the shape most REST APIs have. */
+    async orders(term, offset, limit, signal) {
+      await delay(150, signal);
       const p = plan(term);
-      return Array.from({ length: n }, (_, i) => {
-        const id = p.rowAt(start + i);
-        return [id + 1, PRODUCTS[id % PRODUCTS.length], (id % 97) + 1, ((id * 7919) % 100000) / 100];
+      const n = Math.max(0, Math.min(limit, p.count - offset));
+      const rows = Array.from({ length: n }, (_, i) => {
+        const id = p.rowAt(offset + i);
+        return { id: id + 1, product: PRODUCTS[id % PRODUCTS.length], qty: (id % 97) + 1, price: ((id * 7919) % 100000) / 100 };
       });
+      return { rows, total: p.count };
     },
   };
 })();
 
 function CustomBackendDemo({ grid: gridProps }) {
   const [term, setTerm] = useState('');
-  // Callbacks may use props and state; when `term` changes the grid reloads in place.
+  const [open, setOpen] = useState(null);
+  const [menu, setMenu] = useState(null);
+  const [checked, setChecked] = useState({ all: false, ids: [] });
+  // getRows: pages of rows by offset / limit. Callbacks may use props and state; when `term` changes the
+  // grid reloads in place.
   const source = useDataSource({
-    getLayout: async ({ signal }) => ({ rowCount: await fakeApi.count(term, signal) }),
-    getCells: ({ rects, signal }) => Promise.all(rects.map(async (r) => {
-      const rows = await fakeApi.rows(term, r.row, r.rowCount, signal);
-      return rows.map((line) => line.slice(r.col, r.col + r.colCount));
-    })),
-    maxRectsPerRequest: 1,
+    getRows: ({ offset, limit, signal }) => fakeApi.orders(term, offset, limit, signal),
   }, [term]);
+  useEffect(() => {
+    if (!menu) return undefined;
+    const close = () => setMenu(null);
+    window.addEventListener('pointerdown', close);
+    return () => window.removeEventListener('pointerdown', close);
+  }, [menu]);
   return (
     <section className="demo">
       <div className="controls">
         <label className="field">Product contains <input value={term} onChange={(e) => setTerm(e.target.value)} placeholder="e.g. la" /></label>
-        <span className="muted">10M rows from a pretend API with ~150 ms latency; the search runs "on the server".</span>
+        <span className="muted">10M orders from a pretend REST API (offset / limit, ~150 ms). Double-click a row to open it; right-click for a menu.</span>
       </div>
-      <VirtualGrid
-        className="grid"
-        aria-label="Orders"
-        dataSource={source}
-        {...gridProps}
-        filterable={false}
-        sortable={false}
-        emptyState="No products match."
-      >
-        <Column field="id" title="Order" type="number" format={(v) => `#${v}`} />
-        <Column field="product" title="Product" renderCell={({ value }) => <strong>{value}</strong>} />
-        <Column field="qty" title="Qty" type="number" />
-        <Column field="price" title="Price" type="number" format={(v) => money.format(v)} />
-      </VirtualGrid>
+      <div className="split">
+        <VirtualGrid
+          className="grid"
+          aria-label="Orders"
+          dataSource={source}
+          {...gridProps}
+          getRowId={(row) => row.id}
+          rowSelection
+          selectedRows={checked}
+          onRowSelectionChange={setChecked}
+          onCellDoubleClick={({ row }) => row && setOpen(row)}
+          onCellContextMenu={({ row, event }) => {
+            if (!row || !('clientX' in event)) return;
+            event.preventDefault();
+            setMenu({ row, x: event.clientX, y: event.clientY });
+          }}
+          filterable={false}
+          sortable={false}
+          emptyState="No products match."
+        >
+          <Column field="id" title="Order" type="number" format={(v) => `#${v}`} />
+          <Column field="product" title="Product" renderCell={({ value }) => <strong>{value}</strong>} />
+          <Column field="qty" title="Qty" type="number" />
+          <Column field="price" title="Price" type="number" format={(v) => money.format(v)} />
+          <Column
+            field="actions"
+            title=""
+            width={110}
+            sortable={false}
+            filter={false}
+            renderCell={({ row }) => row && <button type="button" className="link-btn" onClick={() => setOpen(row)}>Open</button>}
+          />
+        </VirtualGrid>
+        {open && (
+          <aside className="detail">
+            <header><strong>Order #{open.id}</strong><button type="button" onClick={() => setOpen(null)} aria-label="Close">×</button></header>
+            <dl>
+              <dt>Product</dt><dd>{open.product}</dd>
+              <dt>Quantity</dt><dd>{open.qty}</dd>
+              <dt>Price</dt><dd>{money.format(open.price)}</dd>
+              <dt>Total</dt><dd>{money.format(open.price * open.qty)}</dd>
+            </dl>
+          </aside>
+        )}
+      </div>
+      {menu && (
+        <ul className="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>
+          <li><button type="button" onClick={() => { setOpen(menu.row); setMenu(null); }}>Open order #{menu.row.id}</button></li>
+          <li><button type="button" onClick={() => { navigator.clipboard?.writeText(String(menu.row.id)); setMenu(null); }}>Copy order number</button></li>
+        </ul>
+      )}
+      <footer className="status">
+        <span>{checked.all ? `All orders checked${checked.except.length ? ` except ${checked.except.length}` : ''}` : `${checked.ids.length} checked`}</span>
+      </footer>
     </section>
   );
 }

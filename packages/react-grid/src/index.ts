@@ -7,9 +7,9 @@
 export { VirtualGrid } from './VirtualGrid.js';
 export { Column, createColumnHelper, type ColumnHelper } from './columns.js';
 export { useDataSource, useArraySource, type ReactDataSource, type UseArraySourceOptions } from './hooks.js';
-export type { CellContext, ColumnDef, FieldValue, FilterFns, ReactCustomFilter, SelectedCells, VirtualGridProps } from './types.js';
+export type { CellContext, CellEvent, ColumnDef, FieldValue, FilterFns, ReactCustomFilter, SelectedCells, VirtualGridProps } from './types.js';
 
-export { createArraySource, createHttpSource } from '@borealjs/grid-core';
+export { createArraySource, createHttpSource, createRowSource } from '@borealjs/grid-core';
 export type {
   Grid,
   Grid as GridApi,
@@ -34,4 +34,10 @@ export type {
   CellRect,
   Messages,
   ArraySource,
+  RowId,
+  RowSelection,
+  GetRowsRequest,
+  RowsResult,
+  RowSource,
+  RowSourceOptions,
 } from '@borealjs/grid-core';

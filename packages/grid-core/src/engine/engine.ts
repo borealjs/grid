@@ -22,8 +22,8 @@ import {
   sameSortKey, sortParamOf, sortToPublic, viewKeyId, type Condition, type SortDir, type SortSpec, type ViewKey,
 } from '../query.js';
 import type {
-  CellClassResult, CellContext, CellPosition, ColumnDef, ColumnFilterItem, ColumnResizeInfo, ControlledParts, CopyInfo, EmptyContext,
-  ErrorContext, FilterItem, FilterTarget, GridStats, HeaderContext, Messages, Progress, Query, Renderer, Selection, SelectionInfo,
+  CellClassResult, CellContext, CellEvent, CellPosition, ColumnDef, ColumnFilterItem, ColumnResizeInfo, ControlledParts, CopyInfo, EmptyContext,
+  ErrorContext, FilterItem, FilterTarget, GridStats, HeaderContext, Messages, Progress, Query, Renderer, RowId, RowSelection, Selection, SelectionInfo,
   SelectionMode, SelectionRange, SortItem, SortTarget, Theme, ViewChangeInfo, ViewWork,
 } from '../types.js';
 import type { Grid } from '../grid.js';
@@ -43,7 +43,7 @@ import { MergeLayer } from './merge-layer.js';
 import { MergeIndex, mergePieces, type MergePiece } from './merges.js';
 import { Notices } from './notices.js';
 import { SelectionLayer, type SelectionBox } from './selection-layer.js';
-import { cellCount, cellRange, inRanges, pieceAt, sameRange, spanRange, type SelectionState } from './selection.js';
+import { cellCount, cellRange, inRanges, isActiveOnly, pieceAt, rangeOf, type SelectionState } from './selection.js';
 import { SpanLayer } from './span-layer.js';
 
 export { LABEL_BLOCK };
@@ -127,6 +127,21 @@ export interface EngineOptions {
   renderEmpty?: Renderer<EmptyContext>;
   /** The data record at a row source position (cell renderers' ctx.row). */
   rowAt?(position: number): unknown;
+  /** Id of the row at a source position, when its record is loaded (getRowId). */
+  rowId?(position: number): RowId | undefined;
+  /** Source position of a row id in the current view, or -1 when it is gone or unknown. */
+  findRow?(id: RowId): number | Promise<number>;
+  /** Row checkboxes in the row-number column. */
+  rowSelection?: boolean;
+  selectedRows?: RowSelection;
+  /** Whether an event callback is set (the Grid passes stable wrappers for all of them). */
+  hasHandler?(name: 'onCellClick' | 'onCellDoubleClick' | 'onCellContextMenu'): boolean;
+  /** New column order, as source indexes. */
+  onColumnOrderChange?(order: number[]): void;
+  onRowSelectionChange?(selection: RowSelection): void;
+  onCellClick?(e: CellEvent): void;
+  onCellDoubleClick?(e: CellEvent): void;
+  onCellContextMenu?(e: CellEvent): void;
   onSortChange?(sort: SortItem[]): void;
   onFilterChange?(filter: FilterItem[]): void;
   onColumnFilterChange?(columnFilter: ColumnFilterItem[]): void;
@@ -312,6 +327,18 @@ export class GridEngine {
   rowHeadLayer!: HTMLDivElement;
   colHead!: HTMLDivElement;
   colHeadLayer!: HTMLDivElement;
+  /** Pinned columns: their own body and header, which scroll only vertically. */
+  pinBody!: HTMLDivElement;
+  pinLayer!: HTMLDivElement;
+  pinSelEl!: HTMLDivElement;
+  pinSel!: SelectionLayer;
+  pinHead!: HTMLDivElement;
+  pinHeadLayer!: HTMLDivElement;
+  pinSpans!: SpanLayer;
+  pinSlots: RowSlot[] = [];
+  /** Pinned column count and width (px) as last drawn. */
+  pinCount = 0;
+  pinW = 0;
   corner!: HTMLDivElement;
   emptyEl!: HTMLDivElement;
   rowSpans!: SpanLayer;
@@ -352,6 +379,15 @@ export class GridEngine {
   #infos: (ColumnInfo | null)[] = [];
   /** Merges whose top-left cell is not loaded yet ("rs:cs"). */
   #mergeAnchors = new Set<string>();
+  #pinSig = '';
+  /** The active row's id, noted when the selection moved there (so it survives data changes). */
+  #activeRow: { r: number; id: RowId } | null = null;
+  #followSeq = 0;
+  /** Checked rows: ids (or, with `all`, the exceptions). Without row ids, keys are positions. */
+  #rowSel: { all: boolean; set: Set<RowId> } = { all: false, set: new Set() };
+  #lastCheck = -1;
+  #cornerCheck: HTMLInputElement | null = null;
+  #suppressHeadClick = false;
   #pieces: MergePiece[] = [];
   /** View signature -> its caches (LRU). */
   #views = new Map<string, DataView>();
@@ -535,8 +571,11 @@ export class GridEngine {
     });
   }
 
-  /** Drop every cached cell and label and load what is on screen again (the data changed). */
-  async refresh(): Promise<void> {
+  /**
+   * Drop every cached cell and label and load what is on screen again (the data changed). `snap` is the
+   * active row from rowSnapshot(), taken before the data source dropped its own cache.
+   */
+  async refresh(snap: { id: RowId; c: number } | null = this.rowSnapshot()): Promise<void> {
     for (const v of this.#views.values()) v.cache.abortAll();
     for (const c of this.#colLabelCaches.values()) c.abortAll();
     this.#views.clear();
@@ -555,15 +594,16 @@ export class GridEngine {
     this.#useColLabels();
     this.#useView();
     this.#structureChanged();
-    this.#clampSelection();
+    this.#followRow(snap);
     this.repaint();
   }
 
   /** Redraw every cell and header (after format / render functions changed). The data stays. */
   repaint(): void {
-    for (const slot of this.rowSlots) for (const cell of slot.cells) cell.c = -1;
+    for (const slot of [...this.rowSlots, ...this.pinSlots]) for (const cell of slot.cells) cell.c = -1;
     this.colSpans.resetCustom();
     this.rowSpans.resetCustom();
+    this.pinSpans.resetCustom();
     this.anchorCol = null;
     this.rendered.vx = NaN;
     this.invalidate();
@@ -694,6 +734,7 @@ export class GridEngine {
     };
     this.lastRefusal = '';
     this.lastCancelled = false;
+    const follow = this.rowSnapshot();
     const limitReason = this.#limitReason(sortList, filterList);
     if (limitReason) return refuse(limitReason);
     const token = ++this.#sortSeq;
@@ -745,7 +786,7 @@ export class GridEngine {
     this.#useColLabels();
     this.#useView();
     this.#structureChanged();
-    this.#clampSelection();
+    this.#followRow(follow);
     this.#renderCornerSort();
     this.scrollToVirtual(this.vx, this.vy);
     this.o.onViewChange?.({
@@ -958,8 +999,9 @@ export class GridEngine {
 
   destroy(): void {
     this.#endWork();
-    for (const slot of this.rowSlots) for (const cell of slot.cells) if (cell.cleanup !== undefined) this.#runCleanup(cell);
+    for (const slot of [...this.rowSlots, ...this.pinSlots]) for (const cell of slot.cells) if (cell.cleanup !== undefined) this.#runCleanup(cell);
     this.colSpans.destroy();
+    this.pinSpans.destroy();
     this.rowSpans.destroy();
     this.emptyCleanup?.();
     this.#ro.disconnect();
@@ -973,10 +1015,17 @@ export class GridEngine {
     this.scroller.removeEventListener('scroll', this.#onScroll);
     this.scroller.removeEventListener('wheel', this.#onWheel);
     this.scroller.removeEventListener('keydown', this.#onKeyDown);
-    this.colHead.removeEventListener('pointerdown', this.#onHeadPointerDown);
-    this.colHead.removeEventListener('click', this.#onHeadClick);
+    for (const head of [this.colHead, this.pinHead]) {
+      head.removeEventListener('pointerdown', this.#onHeadPointerDown);
+      head.removeEventListener('click', this.#onHeadClick);
+    }
     this.rowHead.removeEventListener('click', this.#onHeadClick);
-    this.body.removeEventListener('pointerdown', this.#onBodyPointerDown);
+    for (const body of [this.body, this.pinBody]) {
+      body.removeEventListener('pointerdown', this.#onBodyPointerDown);
+      body.removeEventListener('click', this.#onBodyClick);
+      body.removeEventListener('dblclick', this.#onBodyDblClick);
+      body.removeEventListener('contextmenu', this.#onBodyContextMenu);
+    }
     this.corner.removeEventListener('click', this.#onCornerClick);
     this.host.textContent = '';
     this.host.classList.remove('vg', 'vg-auto', 'vg-light', 'vg-dark', 'vg-nosel', 'vg-pivot', 'vg-table');
@@ -1008,10 +1057,19 @@ export class GridEngine {
     this.mergeLayer = new MergeLayer(this.mergeLayerEl);
     this.selLayerEl = div('vg-layer vg-sel-layer', this.body);
     this.selLayer = new SelectionLayer(this.selLayerEl);
+    // Drawn after the body and the column headers, so they cover the columns scrolled beneath them.
+    this.pinBody = div('vg-body vg-pinbody', this.viewport);
+    this.pinBody.hidden = true;
+    this.pinLayer = div('vg-layer', this.pinBody);
+    this.pinSelEl = div('vg-layer vg-sel-layer', this.pinBody);
+    this.pinSel = new SelectionLayer(this.pinSelEl);
     this.rowHead = div('vg-rowhead', this.viewport);
     this.rowHeadLayer = div('vg-layer', this.rowHead);
     this.colHead = div('vg-colhead', this.viewport);
     this.colHeadLayer = div('vg-layer', this.colHead);
+    this.pinHead = div('vg-colhead vg-pinhead', this.viewport);
+    this.pinHead.hidden = true;
+    this.pinHeadLayer = div('vg-layer', this.pinHead);
     this.corner = div('vg-corner', this.viewport);
     this.emptyEl = div('vg-empty', this.viewport);
     this.emptyEl.hidden = true;
@@ -1022,16 +1080,26 @@ export class GridEngine {
     this.colSpans = new SpanLayer(this.colHeadLayer, false, true, true, 'cols');
     this.rowSpans.renderHeader = (el, ctx) => this.o.renderHeader?.(el, ctx);
     this.colSpans.renderHeader = (el, ctx) => this.o.renderHeader?.(el, ctx);
-    this.rowSpans.hasRenderer = this.colSpans.hasRenderer = () => typeof this.o.renderHeader === 'function';
+    this.rowSpans.checkLabel = this.msg.selectRow;
+    this.pinSpans = new SpanLayer(this.pinHeadLayer, false, true, true, 'cols');
+    this.pinSpans.renderHeader = (el, ctx) => this.o.renderHeader?.(el, ctx);
+    this.rowSpans.hasRenderer = this.colSpans.hasRenderer = this.pinSpans.hasRenderer = () => typeof this.o.renderHeader === 'function';
     this.#buildCorner();
 
     this.scroller.addEventListener('scroll', this.#onScroll, { passive: true });
     this.scroller.addEventListener('wheel', this.#onWheel, { passive: false });
     this.scroller.addEventListener('keydown', this.#onKeyDown);
-    this.colHead.addEventListener('pointerdown', this.#onHeadPointerDown);
-    this.colHead.addEventListener('click', this.#onHeadClick);
+    for (const head of [this.colHead, this.pinHead]) {
+      head.addEventListener('pointerdown', this.#onHeadPointerDown);
+      head.addEventListener('click', this.#onHeadClick);
+    }
     this.rowHead.addEventListener('click', this.#onHeadClick);
-    this.body.addEventListener('pointerdown', this.#onBodyPointerDown);
+    for (const body of [this.body, this.pinBody]) {
+      body.addEventListener('pointerdown', this.#onBodyPointerDown);
+      body.addEventListener('click', this.#onBodyClick);
+      body.addEventListener('dblclick', this.#onBodyDblClick);
+      body.addEventListener('contextmenu', this.#onBodyContextMenu);
+    }
     this.corner.addEventListener('click', this.#onCornerClick);
     this.corner.title = this.msg.selectAll;
   }
@@ -1067,6 +1135,16 @@ export class GridEngine {
       d.style.height = `${colTiers[T - 1].height}px`;
       d.style.lineHeight = `${colTiers[T - 1].height}px`;
       d.textContent = band.name ?? '';
+      if (b === 0 && this.o.rowSelection) {
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.className = 'vg-check';
+        box.tabIndex = -1;
+        box.setAttribute('aria-label', this.msg.selectAllRows);
+        d.insertBefore(box, d.firstChild);
+        d.classList.add('vg-cn-check');
+        this.#cornerCheck = box;
+      }
       const sortKey = model.rowBandSort?.(b);
       const key = this.#allowed('sortable', sortKey) ? sortKey : null;
       const filterKey = model.rowBandFilter?.(b);
@@ -1159,6 +1237,38 @@ export class GridEngine {
     this.anchorRow = null;
     this.anchorCol = null;
     this.rendered.vx = NaN;
+    this.#ensurePinPool(true);
+  }
+
+  /** Cells of the pinned columns: N rows × (pinned count) cells, rebuilt when either changes. */
+  #ensurePinPool(force = false): void {
+    const P = Math.min(this.model.pinnedCols?.() ?? 0, this.cols.count);
+    if (!force && P === this.pinCount && this.pinSlots.length === this.N) return;
+    for (const slot of this.pinSlots) for (const cell of slot.cells) if (cell.cleanup !== undefined) this.#clearCustom(cell);
+    this.pinCount = P;
+    this.#pinSig = '';
+    this.pinSlots = [];
+    const frag = document.createDocumentFragment();
+    if (P > 0) {
+      for (let i = 0; i < this.N; i++) {
+        const el = div('vg-row');
+        el.setAttribute('role', 'row');
+        const cells: CellSlot[] = [];
+        for (let j = 0; j < P; j++) {
+          const cellEl = div('vg-cell', el);
+          cellEl.setAttribute('role', 'gridcell');
+          cells.push({
+            el: cellEl, text: cellEl.appendChild(document.createTextNode('')), box: null, cleanup: undefined, extra: '', c: -1,
+            base: 'vg-cell', cls: 'vg-cell', filled: false, ph: false, covered: 0, selected: undefined,
+          });
+        }
+        frag.appendChild(el);
+        this.pinSlots.push({ el, cells, r: -1, h: NaN, cls: 'vg-row' });
+      }
+    }
+    this.pinLayer.replaceChildren(frag);
+    this.pinBody.hidden = P === 0;
+    this.pinHead.hidden = P === 0;
   }
 
   // ---------------------------------------------------------------- input
@@ -1247,6 +1357,19 @@ export class GridEngine {
       return;
     }
     if (e.altKey) return;
+    if (e.key === 'ContextMenu' || (shift && e.key === 'F10')) {
+      const fn = this.#handler('onCellContextMenu');
+      if (fn && this.rows.count && this.cols.count) {
+        e.preventDefault();
+        fn(this.#cellEvent(this.sel.active, e));
+      }
+      return;
+    }
+    if (e.key === ' ' && !mod && this.#checksOn()) {
+      e.preventDefault();
+      this.toggleRow(this.sel.active.r, shift);
+      return;
+    }
     const last = { r: this.rows.count - 1, c: this.cols.count - 1 };
     const from = shift ? this.sel.focus : this.sel.active;
     switch (e.key) {
@@ -1284,9 +1407,219 @@ export class GridEngine {
   };
 
   #cellAt(x: number, y: number, rect: DOMRect): CellPosition {
-    const px = clamp(x - rect.left, 0, Math.max(0, this.bodyW - 1)) + this.vx;
+    const lx = clamp(x - rect.left, 0, Math.max(0, this.bodyW - 1));
     const py = clamp(y - rect.top, 0, Math.max(0, this.bodyH - 1)) + this.vy;
-    return { r: this.rows.indexAt(py), c: this.cols.indexAt(px) };
+    // Over the pinned columns: they do not scroll sideways.
+    const pin = this.#pinWidth();
+    const c = lx < pin ? Math.min(this.cols.indexAt(lx), this.pinCount - 1) : this.cols.indexAt(lx + this.vx);
+    return { r: this.rows.indexAt(py), c };
+  }
+
+  /** Width of the pinned columns (0 without any). */
+  #pinWidth(): number {
+    return this.pinCount ? this.cols.offsetOf(this.pinCount) : 0;
+  }
+
+  // ---------------------------------------------------------------- cell events
+
+  #handler(name: 'onCellClick' | 'onCellDoubleClick' | 'onCellContextMenu'): ((e: CellEvent) => void) | undefined {
+    const fn = this.o[name];
+    if (!fn || (this.o.hasHandler && !this.o.hasHandler(name))) return undefined;
+    return fn;
+  }
+
+  /** What a cell event callback gets: the cell's context, its column key and the DOM event. */
+  #cellEvent({ r, c }: CellPosition, event: MouseEvent | KeyboardEvent): CellEvent {
+    const rs = this.rowSource(r);
+    const cs = this.colSource(c);
+    const value = this.cellValue(r, c);
+    const ctx = this.#cellCtx(r, c, rs, cs, value, this.#infoOf(cs).column) as CellEvent;
+    ctx.text = this.cellText(r, c) ?? '';
+    ctx.key = this.model.keyOf?.(cs);
+    ctx.event = event;
+    return ctx;
+  }
+
+  #bodyEvent(name: 'onCellClick' | 'onCellDoubleClick' | 'onCellContextMenu', e: MouseEvent): void {
+    const fn = this.#handler(name);
+    if (!fn || this.rows.count === 0 || this.cols.count === 0 || isInteractive(e.target)) return;
+    const cell = this.#clampCell(this.#cellAt(e.clientX, e.clientY, this.body.getBoundingClientRect()));
+    // A right click outside the selection selects the cell first (as in spreadsheets).
+    if (name === 'onCellContextMenu' && !inRanges(this.sel.ranges, cell.r, cell.c)) this.#select(cell, 'set');
+    fn(this.#cellEvent(cell, e));
+  }
+
+  #onBodyClick = (e: MouseEvent): void => this.#bodyEvent('onCellClick', e);
+
+  #onBodyDblClick = (e: MouseEvent): void => this.#bodyEvent('onCellDoubleClick', e);
+
+  #onBodyContextMenu = (e: MouseEvent): void => this.#bodyEvent('onCellContextMenu', e);
+
+  // ---------------------------------------------------------------- row identity
+
+  /** Remember which row the active cell is on (by id), so the selection can follow it later. */
+  #noteActiveRow(): void {
+    const r = this.sel.active.r;
+    if (!this.o.rowId || this.#activeRow?.r === r) return;
+    const id = r < this.rows.count ? this.o.rowId(this.rowSource(r)) : undefined;
+    this.#activeRow = id === undefined ? null : { r, id };
+  }
+
+  /** The active row's id and column, before a sort, filter or refresh. */
+  rowSnapshot(): { id: RowId; c: number } | null {
+    this.#noteActiveRow();
+    const a = this.#activeRow;
+    return a && a.r === this.sel.active.r ? { id: a.id, c: this.sel.active.c } : null;
+  }
+
+  /**
+   * After the rows changed order or content: put the selection back on the row it was on (found by id),
+   * or on the first row when that row is gone. Without row ids the selection keeps its position.
+   */
+  #followRow(snap: { id: RowId; c: number } | null): void {
+    this.#clampSelection();
+    if (this.#checksOn() && !this.o.rowId) this.#rowSel = { all: false, set: new Set() }; // positions changed
+    if (!snap || !this.o.findRow) return;
+    const seq = ++this.#followSeq;
+    const apply = (pos: number) => {
+      if (seq !== this.#followSeq || this.rows.count === 0) return;
+      const cell = this.#clampCell({ r: pos >= 0 ? pos : 0, c: snap.c });
+      this.sel = { active: cell, anchor: cell, focus: cell, ranges: [rangeOf(cell, cell)] };
+      this.#activeRow = pos >= 0 ? { r: cell.r, id: snap.id } : null;
+      this.#selectionChanged();
+    };
+    let res: number | Promise<number>;
+    try {
+      res = this.o.findRow(snap.id);
+    } catch {
+      res = -1;
+    }
+    if (typeof res === 'number') apply(res);
+    else res.then(apply, () => apply(-1));
+  }
+
+  // ---------------------------------------------------------------- row checkboxes
+
+  #checksOn(): boolean {
+    return !!this.o.rowSelection && this.model.hostClass === 'vg-table';
+  }
+
+  /** Key of a row for checking: its id, or (without row ids) its position. undefined while not loaded. */
+  #rowKey(r: number): RowId | undefined {
+    const rs = this.rowSource(r);
+    return this.o.rowId ? this.o.rowId(rs) : rs;
+  }
+
+  #isChecked(r: number): boolean {
+    const key = this.#rowKey(r);
+    const { all, set } = this.#rowSel;
+    if (all) return key === undefined || !set.has(key);
+    return key !== undefined && set.has(key);
+  }
+
+  #setChecked(r: number, on: boolean): void {
+    const key = this.#rowKey(r);
+    if (key === undefined) return;
+    const { all, set } = this.#rowSel;
+    if (on !== all) set.add(key);
+    else set.delete(key);
+  }
+
+  getRowSelection(): RowSelection {
+    const { all, set } = this.#rowSel;
+    return all ? { all: true, except: [...set] } : { all: false, ids: [...set] };
+  }
+
+  setRowSelection(sel: RowSelection | null | undefined): void {
+    const next = sel && sel.all ? { all: true, set: new Set<RowId>(sel.except ?? []) } : { all: false, set: new Set<RowId>((sel as { ids?: RowId[] } | null)?.ids ?? []) };
+    this.#rowSel = next;
+    this.anchorRow = null; // row classes and checkboxes
+    this.invalidate();
+  }
+
+  #rowSelectionChanged(): void {
+    this.anchorRow = null;
+    this.#render(true);
+    this.o.onRowSelectionChange?.(this.getRowSelection());
+  }
+
+  /** Check or uncheck a row; with Shift, every row from the last one clicked takes the same state. */
+  toggleRow(r: number, range = false): void {
+    if (!this.#checksOn() || r < 0 || r >= this.rows.count) return;
+    const on = !this.#isChecked(r);
+    if (range && this.#lastCheck >= 0 && this.#lastCheck < this.rows.count) {
+      const a = Math.min(this.#lastCheck, r);
+      const b = Math.max(this.#lastCheck, r);
+      for (let i = a; i <= b; i++) this.#setChecked(i, on);
+    } else this.#setChecked(r, on);
+    this.#lastCheck = r;
+    this.#rowSelectionChanged();
+  }
+
+  /** The header checkbox: all rows (matching the filter), or none. */
+  toggleAllRows(): void {
+    if (!this.#checksOn()) return;
+    const { all, set } = this.#rowSel;
+    const everything = all && set.size === 0;
+    const some = all || set.size > 0;
+    this.#rowSel = everything || some ? { all: false, set: new Set() } : { all: true, set: new Set() };
+    this.#rowSelectionChanged();
+  }
+
+  #paintCornerCheck(): void {
+    const box = this.#cornerCheck;
+    if (!box) return;
+    const { all, set } = this.#rowSel;
+    box.checked = all && set.size === 0;
+    box.indeterminate = (all && set.size > 0) || (!all && set.size > 0);
+  }
+
+  // ---------------------------------------------------------------- column order
+
+  /** Move the column at visible index `from` to visible index `to` (pinned and other columns stay apart). */
+  moveColumn(from: number, to: number): void {
+    const { model } = this;
+    if (!model.columnOrder || !model.setColumnOrder) return;
+    const n = this.cols.count;
+    const P = this.pinCount;
+    if (from < 0 || from >= n) return;
+    to = from < P ? clamp(to, 0, P - 1) : clamp(to, P, n - 1);
+    if (to === from) return;
+    const visible = Array.from({ length: n }, (_, i) => this.colSource(i));
+    const [moved] = visible.splice(from, 1);
+    visible.splice(to, 0, moved);
+    // Hidden columns keep their slots in the full order; the visible ones take the new sequence.
+    const shown = new Set(visible);
+    let k = 0;
+    const order = model.columnOrder().map((s) => (shown.has(s) ? visible[k++] : s));
+    const activeSrc = this.colSource(this.sel.active.c);
+    model.setColumnOrder(order);
+    this.cols = model.cols;
+    this.#structureChanged();
+    const c = this.#visibleCol(activeSrc);
+    if (c >= 0) {
+      const cell = { r: this.sel.active.r, c };
+      this.sel = { active: cell, anchor: cell, focus: cell, ranges: [rangeOf(cell, cell)] };
+    } else this.#clampSelection();
+    this.scrollToVirtual(this.vx, this.vy);
+    this.o.onColumnOrderChange?.(model.columnOrder());
+    this.o.onSelectionChange?.(this.selectionInfo());
+  }
+
+  /** Apply a column order (source indexes) from code. */
+  setColumnOrder(order: number[]): void {
+    const { model } = this;
+    if (!model.setColumnOrder) return;
+    model.setColumnOrder(order);
+    this.cols = model.cols;
+    this.#structureChanged();
+    this.#clampSelection();
+    this.scrollToVirtual(this.vx, this.vy);
+  }
+
+  #visibleCol(src: number): number {
+    const base = (this.cols as { base?: { fromSource?(s: number): number } }).base;
+    return base?.fromSource ? base.fromSource(src) : src;
   }
 
   #onBodyPointerDown = (e: PointerEvent): void => {
@@ -1348,6 +1681,11 @@ export class GridEngine {
   }
 
   #onCornerClick = (e: MouseEvent): void => {
+    // No preventDefault on checkboxes: the browser would undo the state drawn here after the event.
+    if (closest(e.target, '.vg-check')) {
+      this.toggleAllRows();
+      return;
+    }
     if (this.#handleControlClick(e)) return;
     this.scroller.focus({ preventScroll: true });
     this.selectAll();
@@ -1356,6 +1694,17 @@ export class GridEngine {
   // Header click: a group label toggles its group; any other header selects its rows/columns.
   // With Shift (extend) or Ctrl/Cmd (add), group labels select their rows/columns too.
   #onHeadClick = (e: MouseEvent): void => {
+    if (this.#suppressHeadClick) {
+      this.#suppressHeadClick = false; // the click that ends a column drag
+      return;
+    }
+    const check = closest(e.target, '.vg-check');
+    if (check && e.currentTarget === this.rowHead) {
+      const range = closest(check, '.vg-seg')?.dataset.range;
+      if (range) this.toggleRow(Number(range.split(':')[0]), e.shiftKey);
+      this.scroller.focus({ preventScroll: true });
+      return;
+    }
     if (!(e.target instanceof Element) || e.target.closest('.vg-grip') || isInteractive(e.target)) return;
     if (this.#handleControlClick(e)) return;
     const extend = e.shiftKey;
@@ -1375,8 +1724,12 @@ export class GridEngine {
 
   #onHeadPointerDown = (e: PointerEvent): void => {
     const grip = closest(e.target, '.vg-grip');
-    const col = grip ? Number(grip.parentElement?.dataset.item) : NaN;
-    if (!grip || !Number.isFinite(col)) return;
+    if (!grip) {
+      this.#startColumnDrag(e);
+      return;
+    }
+    const col = Number(grip.parentElement?.dataset.item);
+    if (!Number.isFinite(col)) return;
     e.preventDefault();
     const startX = e.clientX;
     const startW = this.cols.sizeOf(col);
@@ -1397,6 +1750,70 @@ export class GridEngine {
     grip.addEventListener('pointercancel', up);
   };
 
+  /** Drag a column header to another place: a line shows where it will go; Escape cancels. */
+  #startColumnDrag(e: PointerEvent): void {
+    if (e.button !== 0 || closest(e.target, '.vg-sortbtn, .vg-filterbtn') || isInteractive(e.target)) return;
+    const seg = closest(e.target, '.vg-seg');
+    if (!seg?.dataset.move || !seg.dataset.range) return;
+    const from = Number(seg.dataset.range.split(':')[0]);
+    const head = e.currentTarget as HTMLElement;
+    const startX = e.clientX;
+    let line: HTMLDivElement | null = null;
+    let to = from;
+    const target = (clientX: number): number => {
+      const rect = this.body.getBoundingClientRect();
+      const lx = clamp(clientX - rect.left, 0, Math.max(0, this.bodyW - 1));
+      const pin = this.#pinWidth();
+      const P = this.pinCount;
+      const px = from < P ? Math.min(lx, pin - 1) : Math.max(lx, pin) + this.vx;
+      const c = this.cols.indexAt(px);
+      const mid = this.cols.offsetOf(c) + this.cols.sizeOf(c) / 2;
+      let slot = px > mid ? c + 1 : c; // insert before `slot`
+      slot = from < P ? clamp(slot, 0, P) : clamp(slot, P, this.cols.count);
+      // Line position (viewport x) at the boundary before `slot`.
+      const edge = this.cols.offsetOf(slot);
+      const x = this.rowHeaderWidth + (from < P ? edge : Math.max(edge - this.vx, pin));
+      if (line) line.style.transform = `translate3d(${x - 1}px,0,0)`;
+      return slot > from ? slot - 1 : slot;
+    };
+    const move = (ev: PointerEvent) => {
+      if (!line) {
+        if (Math.abs(ev.clientX - startX) < 6) return;
+        line = div('vg-dropline', this.viewport);
+        seg.classList.add('vg-dragging');
+        this.host.classList.add('vg-moving');
+      }
+      to = target(ev.clientX);
+    };
+    const finish = (apply: boolean) => {
+      head.removeEventListener('pointermove', move);
+      head.removeEventListener('pointerup', up);
+      head.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', key, true);
+      if (!line) return;
+      line.remove();
+      line = null;
+      seg.classList.remove('vg-dragging');
+      this.host.classList.remove('vg-moving');
+      this.#suppressHeadClick = true;
+      setTimeout(() => { this.#suppressHeadClick = false; }, 0);
+      if (apply && to !== from) this.moveColumn(from, to);
+    };
+    const up = () => finish(true);
+    const cancel = () => finish(false);
+    const key = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        ev.stopPropagation();
+        finish(false);
+      }
+    };
+    head.setPointerCapture(e.pointerId);
+    head.addEventListener('pointermove', move);
+    head.addEventListener('pointerup', up);
+    head.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', key, true);
+  }
+
   // ---------------------------------------------------------------- selection
 
   /** Current selection in visible coordinates. */
@@ -1406,9 +1823,10 @@ export class GridEngine {
 
   /** Set the selection (visible coordinates); the first range's top-left becomes active unless given. */
   setSelection({ active, ranges }: { active?: CellPosition; ranges?: SelectionRange[] }): void {
+    this.#followSeq++;
     const list = (ranges ?? []).map((g) => this.#clampRange(g));
     const a = this.#clampCell(active ?? (list[0] ? { r: list[0].r0, c: list[0].c0 } : { r: 0, c: 0 }));
-    this.sel = { active: a, anchor: a, focus: a, ranges: list.length ? list : [cellRange(this.#pieces, a)] };
+    this.sel = { active: a, anchor: a, focus: a, ranges: list.length ? list : [rangeOf(a, a)] };
     this.#selectionChanged();
   }
 
@@ -1471,18 +1889,19 @@ export class GridEngine {
 
   /** mode: 'set' (new selection), 'add' (extra range), 'extend' (move the focus corner of the last range). */
   #select(cell: CellPosition, mode: SelectMode): void {
+    this.#followSeq++; // the user moved on: a pending "follow the row" must not move the selection back
     if (this.o.selection !== 'multi') mode = 'set';
     const target = this.#clampCell(cell);
     if (mode === 'extend') {
       this.sel.focus = target;
-      this.sel.ranges[this.sel.ranges.length - 1] = spanRange(this.#pieces, this.sel.anchor, target);
+      this.sel.ranges[this.sel.ranges.length - 1] = rangeOf(this.sel.anchor, target);
     } else {
-      const p = pieceAt(this.#pieces, target.r, target.c);
-      const a = p ? { r: p.vr0, c: p.vc0 } : target;
-      this.sel.active = a;
-      this.sel.anchor = a;
-      this.sel.focus = a;
-      const range = cellRange(this.#pieces, a);
+      // Keep the cell that was clicked, even inside a merged cell: the outline still covers the whole
+      // merged cell, but the view does not jump to its top-left and arrow keys leave from this row/column.
+      this.sel.active = target;
+      this.sel.anchor = target;
+      this.sel.focus = target;
+      const range = rangeOf(target, target);
       if (mode === 'add') this.sel.ranges.push(range);
       else this.sel.ranges = [range];
     }
@@ -1490,29 +1909,35 @@ export class GridEngine {
   }
 
   #selectionChanged(): void {
+    this.#activeRow = null;
+    this.#noteActiveRow();
     this.#render(true);
     this.o.onSelectionChange?.(this.selectionInfo());
   }
 
-  /** Scroll the least amount needed to show a cell (or the merged cell it is in). */
+  /** Scroll the least amount needed to show a cell (just that cell, even inside a large merged cell). */
   #reveal({ r, c }: CellPosition): void {
-    const p = pieceAt(this.#pieces, r, c);
-    const top = this.rows.offsetOf(p ? p.vr0 : r);
-    const bottom = this.rows.offsetOf((p ? p.vr1 : r) + 1);
-    const left = this.cols.offsetOf(p ? p.vc0 : c);
-    const right = this.cols.offsetOf((p ? p.vc1 : c) + 1);
+    const top = this.rows.offsetOf(r);
+    const bottom = this.rows.offsetOf(r + 1);
+    const left = this.cols.offsetOf(c);
+    const right = this.cols.offsetOf(c + 1);
     let y = this.vy;
     let x = this.vx;
     if (top < y || bottom - top > this.bodyH) y = top;
     else if (bottom > y + this.bodyH) y = bottom - this.bodyH;
-    if (left < x || right - left > this.bodyW) x = left;
-    else if (right > x + this.bodyW) x = right - this.bodyW;
+    // Pinned columns are always in view; other columns must not end up beneath them.
+    const pin = this.#pinWidth();
+    if (c >= this.pinCount) {
+      if (left - pin < x || right - left > this.bodyW - pin) x = left - pin;
+      else if (right > x + this.bodyW) x = right - this.bodyW;
+    }
     if (x !== this.vx || y !== this.vy) this.scrollToVirtual(x, y);
   }
 
   #move(dr: number, dc: number, extend: boolean, jump: boolean): void {
     const from = extend ? this.sel.focus : this.sel.active;
-    const p = pieceAt(this.#pieces, from.r, from.c);
+    // Moving the active cell steps over a merged cell; extending a range moves one row/column at a time.
+    const p = extend ? null : pieceAt(this.#pieces, from.r, from.c);
     let { r, c } = from;
     if (jump) {
       if (dr) r = dr < 0 ? 0 : this.rows.count - 1;
@@ -1547,7 +1972,7 @@ export class GridEngine {
   #cycle(dir: number): void {
     const { ranges } = this.sel;
     const g = ranges[ranges.length - 1];
-    const justActive = sameRange(g, cellRange(this.#pieces, this.sel.active));
+    const justActive = isActiveOnly(this.#pieces, g, this.sel.active);
     if (ranges.length !== 1 || justActive) {
       this.#move(dir, 0, false, false);
       return;
@@ -1565,7 +1990,8 @@ export class GridEngine {
         c = c - 1 < g.c0 ? g.c1 : c - 1;
       }
       const q = pieceAt(this.#pieces, r, c);
-      if (!q || (q.vr0 === r && q.vc0 === c)) break; // skip cells hidden under a merged cell
+      // Skip cells hidden under a merged cell; its first cell inside the range stands for it.
+      if (!q || (Math.max(q.vr0, g.r0) === r && Math.max(q.vc0, g.c0) === c)) break;
     }
     this.sel.active = { r, c };
     this.#reveal(this.sel.active);
@@ -1640,28 +2066,41 @@ export class GridEngine {
       const edges = `${ra === a0 ? 1 : 0}${cb === b1 ? 1 : 0}${rb === a1 ? 1 : 0}${ca === b0 ? 1 : 0}`;
       return { x: left - this.anchorColPx, y: top - this.anchorRowPx, w: cols.offsetOf(cb + 1) - left, h: rows.offsetOf(rb + 1) - top, edges };
     };
-    // A selection made before a merged cell was known (initial state, a jump, merges arriving later):
-    // snap the active cell to the merged cell's top-left and grow a bare one-cell range to all of it.
-    const under = pieceAt(this.#pieces, this.sel.active.r, this.sel.active.c);
-    if (under) {
-      const g = this.sel.ranges[this.sel.ranges.length - 1];
-      const bare = this.sel.ranges.length === 1 && g.r0 === g.r1 && g.c0 === g.c1;
-      const topLeft = { r: under.vr0, c: under.vc0 };
-      if (bare && !sameRange(g, { r0: under.vr0, c0: under.vc0, r1: under.vr1, c1: under.vc1 })) {
-        this.sel = { active: topLeft, anchor: topLeft, focus: topLeft, ranges: [cellRange(this.#pieces, topLeft)] };
-        this.invalidate(); // header highlight and aria-selected were computed from the old range this frame
-      }
-    }
+    this.#noteActiveRow();
     const { active, ranges } = this.sel;
     const activeRange = cellRange(this.#pieces, active);
-    const single = ranges.length === 1 && sameRange(ranges[0], activeRange);
-    const boxes = single ? [] : ranges.map((g) => rect(g.r0, g.r1, g.c0, g.c1));
-    const act = rect(activeRange.r0, activeRange.r1, activeRange.c0, activeRange.c1);
+    const single = ranges.length === 1 && isActiveOnly(this.#pieces, ranges[0], active);
+    const P = this.pinCount;
+    // Pinned columns have their own selection layer; a range across both is drawn in two parts, with no
+    // border where they meet.
+    const pinRect = (a0: number, a1: number, b0: number, b1: number): SelectionBox | null => {
+      const ra = Math.max(a0, r0);
+      const rb = Math.min(a1, r1);
+      const cb = Math.min(b1, P - 1);
+      if (ra > rb || b0 > cb) return null;
+      const top = rows.offsetOf(ra);
+      const left = cols.offsetOf(b0);
+      const edges = `${ra === a0 ? 1 : 0}${cb === b1 ? 1 : 0}${rb === a1 ? 1 : 0}1`;
+      return { x: left, y: top - this.anchorRowPx, w: cols.offsetOf(cb + 1) - left, h: rows.offsetOf(rb + 1) - top, edges };
+    };
+    const mainRect = (a0: number, a1: number, b0: number, b1: number): SelectionBox | null => {
+      if (b1 < P) return null;
+      const box = rect(a0, a1, Math.max(b0, P), b1);
+      if (box && b0 < P) box.edges = `${box.edges.slice(0, 3)}0`;
+      return box;
+    };
+    const boxes = single ? [] : ranges.map((g) => (P ? mainRect(g.r0, g.r1, g.c0, g.c1) : rect(g.r0, g.r1, g.c0, g.c1)));
+    const act = P ? mainRect(activeRange.r0, activeRange.r1, activeRange.c0, activeRange.c1) : rect(activeRange.r0, activeRange.r1, activeRange.c0, activeRange.c1);
     this.selLayer.render(boxes, act);
+    if (P) {
+      const pinBoxes = single ? [] : ranges.map((g) => pinRect(g.r0, g.r1, g.c0, g.c1));
+      this.pinSel.render(pinBoxes, pinRect(activeRange.r0, activeRange.r1, activeRange.c0, activeRange.c1));
+    }
 
     // Screen readers: point the grid at the element that shows the active cell.
     let el: HTMLElement | null | undefined = null;
-    if (act) {
+    if (active.c < P) el = this.pinSlots[active.r % this.N]?.r === active.r ? this.pinSlots[active.r % this.N].cells[active.c]?.el : null;
+    else if (act) {
       const p = pieceAt(this.#pieces, active.r, active.c);
       el = p ? this.mergeLayer.live.get(p.key)?.el : this.rowSlots[active.r % this.N]?.cells[active.c % this.M]?.el;
     }
@@ -1879,12 +2318,13 @@ export class GridEngine {
       this.anchorRow = r0;
       this.anchorRowPx = r0px;
       for (const slot of this.rowSlots) slot.r = -1;
+      for (const slot of this.pinSlots) slot.r = -1;
     }
     const c0px = cols.offsetOf(c0);
     if (this.anchorCol === null || Math.abs(c0px - this.anchorColPx) > REBASE_PX) {
       this.anchorCol = c0;
       this.anchorColPx = c0px;
-      for (const slot of this.rowSlots) for (const cell of slot.cells) cell.c = -1;
+      for (const slot of [...this.rowSlots, ...this.pinSlots]) for (const cell of slot.cells) cell.c = -1;
     }
     const ox = vx - this.anchorColPx;
     const oy = vy - this.anchorRowPx;
@@ -1895,6 +2335,21 @@ export class GridEngine {
     this.selLayerEl.style.transform = bodyShift;
     this.colHeadLayer.style.transform = `translate3d(${-ox}px,0,0)`;
     this.rowHeadLayer.style.transform = `translate3d(0,${-oy}px,0)`;
+    this.#ensurePinPool();
+    if (this.pinCount) {
+      this.pinLayer.style.transform = `translate3d(0,${-oy}px,0)`;
+      this.pinSelEl.style.transform = `translate3d(0,${-oy}px,0)`;
+      const pinW = cols.offsetOf(this.pinCount);
+      const sig = Array.from({ length: this.pinCount + 1 }, (_, j) => cols.offsetOf(j)).join(',');
+      if (sig !== this.#pinSig) {
+        this.#pinSig = sig;
+        for (const slot of this.pinSlots) for (const cell of slot.cells) cell.c = -1;
+      }
+      if (pinW !== this.pinW) {
+        this.pinW = pinW;
+        this.host.style.setProperty('--vg-pin-w', `${pinW}px`);
+      }
+    } else this.pinW = 0;
 
     const xs = this.#xs;
     const ws = this.#ws;
@@ -1942,6 +2397,7 @@ export class GridEngine {
     this.#renderHeaders(r0, r1, c0, c1, ox, oy, label);
     this.#renderMerges(r0, c0, ox, oy, valueAt);
     this.#renderBody(r0, r1, c0, c1, valueAt);
+    this.#renderPinned(r0, r1, valueAt);
     this.#renderSelection(r0, r1, c0, c1);
 
     this.rendered.vx = vx;
@@ -1963,22 +2419,32 @@ export class GridEngine {
     const selRanges = this.sel.ranges;
     const { resizable, expandable } = this.o;
     const noSel = this.o.selection === 'none';
-    const colSegs: Segment[] = model.colSegments(c0, c1, label);
-    for (const s of colSegs) {
-      if (s.sort && !this.#allowed('sortable', s.sort)) s.sort = undefined;
-      if (s.filter && !this.#allowed('filterable', s.filter)) s.filter = undefined;
-      if (!resizable) s.resizable = false;
-      if (!expandable) s.toggle = undefined;
-      s.selected = !noSel && s.a === s.b && selRanges.some((g) => g.c0 <= s.b && g.c1 >= s.a);
-      if (s.sort) s.sortState = this.#sortStateOf(s.sort);
-      if (s.filter) s.filterOn = this.#hasFilter(s.filter);
-    }
+    const decorate = (segs: Segment[]) => {
+      for (const s of segs) {
+        if (s.sort && !this.#allowed('sortable', s.sort)) s.sort = undefined;
+        if (s.filter && !this.#allowed('filterable', s.filter)) s.filter = undefined;
+        if (!resizable) s.resizable = false;
+        if (!expandable) s.toggle = undefined;
+        s.selected = !noSel && s.a === s.b && selRanges.some((g) => g.c0 <= s.b && g.c1 >= s.a);
+        if (s.sort) s.sortState = this.#sortStateOf(s.sort);
+        if (s.filter) s.filterOn = this.#hasFilter(s.filter);
+      }
+      return segs;
+    };
+    const colSegs = decorate(model.colSegments(c0, c1, label));
     const rowSegs: Segment[] = model.rowSegments(r0, r1, label);
+    const checks = this.#checksOn();
     for (const s of rowSegs) {
       if (!expandable) s.toggle = undefined;
       s.selected = !noSel && s.a === s.b && selRanges.some((g) => g.r0 <= s.b && g.r1 >= s.a);
+      if (checks && s.a === s.b) s.check = this.#isChecked(s.a);
     }
+    if (checks) this.#paintCornerCheck();
     this.colSpans.render(colSegs, { axis: cols, anchorPx: this.anchorColPx, viewStart: ox, lo: c0, hi: c1, bandOff: this.tierOff, labelExtent: 110 });
+    if (this.pinCount) {
+      const P = this.pinCount;
+      this.pinSpans.render(decorate(model.colSegments(0, P - 1, label)), { axis: cols, anchorPx: 0, viewStart: 0, lo: 0, hi: P - 1, bandOff: this.tierOff, labelExtent: 110 });
+    }
     this.rowSpans.render(rowSegs, { axis: rows, anchorPx: this.anchorRowPx, viewStart: oy, lo: r0, hi: r1, bandOff: this.rowBandOff, labelExtent: rows.minSize });
   }
 
@@ -2020,6 +2486,8 @@ export class GridEngine {
     const selRanges = this.sel.ranges;
     const bands = model.rowBands.length;
     const tiers = model.colTiers.length;
+    const checks = this.#checksOn();
+    const pinned = this.pinCount;
     let rowWrites = 0;
     let cellWrites = 0;
     for (let r = r0; r <= r1; r++) {
@@ -2033,21 +2501,22 @@ export class GridEngine {
           slot.el.style.lineHeight = `${h}px`;
           slot.h = h;
         }
-        const cls = `vg-row${model.rowKind(r)}`;
-        if (cls !== slot.cls) {
-          slot.el.className = cls;
-          slot.cls = cls;
-        }
         slot.el.setAttribute('aria-rowindex', String(r + 1 + tiers));
         for (const cell of slot.cells) cell.filled = false;
         rowWrites++;
+      }
+      const cls = `vg-row${model.rowKind(r)}${checks && this.#isChecked(r) ? ' vg-checked' : ''}`;
+      if (cls !== slot.cls) {
+        slot.el.className = cls;
+        slot.cls = cls;
       }
       const rs = rowSrc[r - r0];
       const coverRow = (r - r0) * M;
       for (let c = c0; c <= c1; c++) {
         const cell = slot.cells[c % M];
         const k = c - c0;
-        const covered = cover[coverRow + k];
+        // Under a merged cell, or a pinned column (drawn in its own layer): hidden.
+        const covered = cover[coverRow + k] || (c < pinned ? 1 : 0);
         if (covered !== cell.covered) {
           cell.el.style.visibility = covered ? 'hidden' : '';
           cell.covered = covered;
@@ -2101,6 +2570,93 @@ export class GridEngine {
     }
     this.stats.rowWrites += rowWrites;
     this.stats.cellWrites += cellWrites;
+  }
+
+  /** Pinned columns: cells at fixed x (they do not scroll sideways), same rows as the body. */
+  #renderPinned(r0: number, r1: number, valueAt: (rs: number, cs: number) => unknown): void {
+    const P = this.pinCount;
+    if (!P) return;
+    const { N, rows, cols, model } = this;
+    const selRanges = this.sel.ranges;
+    const bands = model.rowBands.length;
+    const tiers = model.colTiers.length;
+    const checks = this.#checksOn();
+    const rowSrc = this.#rowSrc;
+    const srcs = new Array<number>(P);
+    const infos = new Array<ColumnInfo>(P);
+    for (let j = 0; j < P; j++) {
+      srcs[j] = this.colSource(j);
+      infos[j] = this.#infoOf(srcs[j]);
+    }
+    for (let r = r0; r <= r1; r++) {
+      const slot = this.pinSlots[r % N];
+      if (!slot) continue;
+      if (slot.r !== r) {
+        slot.r = r;
+        slot.el.style.transform = `translate3d(0,${rows.offsetOf(r) - this.anchorRowPx}px,0)`;
+        const h = rows.sizeOf(r);
+        if (h !== slot.h) {
+          slot.el.style.height = `${h}px`;
+          slot.el.style.lineHeight = `${h}px`;
+          slot.h = h;
+        }
+        slot.el.setAttribute('aria-rowindex', String(r + 1 + tiers));
+        for (const cell of slot.cells) cell.filled = false;
+      }
+      const cls = `vg-row${model.rowKind(r)}${checks && this.#isChecked(r) ? ' vg-checked' : ''}`;
+      if (cls !== slot.cls) {
+        slot.el.className = cls;
+        slot.cls = cls;
+      }
+      const rs = rowSrc[r - r0];
+      for (let j = 0; j < P; j++) {
+        const cell = slot.cells[j];
+        let clsDirty = false;
+        const selected = inRanges(selRanges, r, j);
+        if (selected !== cell.selected) {
+          cell.el.setAttribute('aria-selected', selected ? 'true' : 'false');
+          cell.selected = selected;
+        }
+        if (cell.c !== j) {
+          cell.c = j;
+          cell.el.setAttribute('aria-colindex', String(j + 1 + bands));
+          cell.el.style.transform = `translate3d(${cols.offsetOf(j)}px,0,0)`;
+          cell.el.style.width = `${cols.sizeOf(j)}px`;
+          cell.base = `vg-cell${model.colKind(j)}${infos[j].cls}${j === P - 1 ? ' vg-pin-last' : ''}`;
+          cell.filled = false;
+          clsDirty = true;
+        }
+        if (!cell.filled) {
+          const cs = srcs[j];
+          const value = rs < 0 || cs < 0 ? null : valueAt(rs, cs);
+          if (value !== undefined) {
+            const extra = rs < 0 || cs < 0 ? this.#fillBlank(cell) : this.#fillCell(cell, infos[j], r, j, rs, cs, value);
+            if (extra !== cell.extra) {
+              cell.extra = extra;
+              clsDirty = true;
+            }
+            cell.filled = true;
+            if (cell.ph) {
+              cell.ph = false;
+              clsDirty = true;
+            }
+          } else if (!cell.ph) {
+            if (cell.cleanup !== undefined) this.#clearCustom(cell);
+            cell.text.data = '';
+            cell.ph = true;
+            if (cell.extra) cell.extra = '';
+            clsDirty = true;
+          }
+        }
+        if (clsDirty) {
+          const c = cell.ph ? `${cell.base} vg-ph` : cell.base + cell.extra;
+          if (c !== cell.cls) {
+            cell.el.className = c;
+            cell.cls = c;
+          }
+        }
+      }
+    }
   }
 
   // ---------------------------------------------------------------- cell content
@@ -2282,6 +2838,12 @@ export class GridEngine {
     };
     const R = split(ra, rb, this.rowSource, BR, midR, RUN_MIN_ROWS);
     const C = split(ca, cb, this.colSource, BC, midC, RUN_MIN_COLS);
+    // Pinned columns are on screen whatever the horizontal scroll.
+    if (this.pinCount) {
+      const pinned = split(0, this.pinCount - 1, this.colSource, BC, 0, RUN_MIN_COLS);
+      for (const [id] of pinned.dense) if (!C.dense.has(id)) C.dense.set(id, 0);
+      for (const [id] of pinned.sparse) if (!C.sparse.has(id)) C.sparse.set(id, 0);
+    }
     const rowSrcCount = this.model.rowSourceCount ?? rowCount;
     const colSrcCount = this.model.colSourceCount ?? colCount;
     const rowSpan = (br: number): [number, number] => [br * BR, Math.min(BR, rowSrcCount - br * BR)];

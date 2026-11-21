@@ -136,6 +136,36 @@ export interface GetCellsRequest {
   signal?: AbortSignal;
 }
 
+/** A page of rows for getRows: rows `offset` … `offset + limit - 1` (`start` / `end` say the same). */
+export interface GetRowsRequest {
+  offset: number;
+  limit: number;
+  start: number;
+  /** Exclusive. */
+  end: number;
+  /** Highest priority first; items carry the column `key` (when columns have keys). */
+  sort: SortItem[];
+  filter: FilterItem[];
+  query: Query;
+  signal?: AbortSignal;
+  /** On the first page of a new sort or filter: report how far a slow one is (the grid shows it, with Cancel). */
+  onProgress?(progress: Progress): void;
+}
+
+/** What getRows returns: the rows of the page and how many rows match the filter. */
+export interface RowsResult<Row = any> {
+  rows: Row[];
+  total: number;
+  /** Rows without any filter (for "filtered from" texts), when cheap to tell. */
+  totalUnfiltered?: number;
+}
+
+/** A row's stable id (from getRowId). */
+export type RowId = string | number;
+
+/** Checked rows: a list of ids, or every row (matching the filter) except some. */
+export type RowSelection = { all: false; ids: RowId[] } | { all: true; except: RowId[] };
+
 export interface GetLayoutRequest {
   query: Query;
   signal?: AbortSignal;
@@ -154,12 +184,18 @@ export interface GetLabelsRequest {
 type MaybePromise<T> = T | Promise<T>;
 
 /**
- * Where the data comes from. Only getCells is required. The grid asks only for what is on screen; every
- * call gets an AbortSignal (pass it to fetch so requests that are no longer needed are cancelled).
+ * Where the data comes from: getRows (pages of whole rows, offset / limit) or getCells (rectangles of
+ * cells, for pivots and very wide tables). The grid asks only for what is on screen; every call gets an
+ * AbortSignal (pass it to fetch so requests that are no longer needed are cancelled).
  */
 export interface DataSource<V = unknown> {
-  /** Cells of one or more rects. */
-  getCells(request: GetCellsRequest): MaybePromise<CellsResult<V>>;
+  /**
+   * Rows by offset / limit, as most backends serve them. Cells are read from the rows by column `key`
+   * (or `value(row)`), and cell renderers and events get the row (`ctx.row`). Use this or getCells.
+   */
+  getRows?(request: GetRowsRequest): MaybePromise<RowsResult>;
+  /** Cells of one or more rects (columns by index). Use this or getRows. */
+  getCells?(request: GetCellsRequest): MaybePromise<CellsResult<V>>;
   /**
    * Row count (tables) or the row/column trees (pivots) for a query. Needed for filtering and pivots.
    * A slow sort or filter may report how far it is with onProgress; the grid shows it with a Cancel button,
@@ -170,8 +206,12 @@ export interface DataSource<V = unknown> {
   getLabels?(request: GetLabelsRequest): MaybePromise<(string | null)[]>;
   /** Distinct values for value-list filters (first `limit` matching `search`). */
   getFilterValues?(request: FilterValuesRequest): MaybePromise<FilterValuesResult>;
-  /** In-memory sources: the record at a position of the sorted / filtered view (gives cells ctx.row). */
+  /** The record at a position of the sorted / filtered view, if loaded (gives cells ctx.row). */
   rowAt?(position: number, query: Query): unknown;
+  /** Position of the row with this id in the sorted / filtered view, or -1. Lets the selection follow rows. */
+  indexOfRow?(id: RowId, query: Query, getRowId: (row: any) => RowId): MaybePromise<number>;
+  /** Drop cached data (grid.refresh() calls it). */
+  clearCache?(): void;
   /** Rects per getCells call (default 400; 1 = one rect per call). */
   maxRectsPerRequest?: number;
   /** Cells per getCells call (default 20,000). */
@@ -255,6 +295,10 @@ export interface ColumnDef<V = unknown, Row = any> {
   sortable?: boolean;
   resizable?: boolean;
   hidden?: boolean;
+  /** Keep the column at the start while scrolling sideways (tables). */
+  pinned?: boolean;
+  /** false: the column cannot be dragged to another place. */
+  reorderable?: boolean;
   /** Group name for the column chooser (column filter level 0). */
   group?: string;
   filter?: FilterKind;
@@ -297,6 +341,9 @@ export interface Messages {
   clear: string;
   apply: string;
   selectAll: string;
+  /** Row checkbox (rowSelection). */
+  selectRow: string;
+  selectAllRows: string;
   columns: string;
   applying: string;
   cancel: string;
@@ -377,6 +424,13 @@ export interface ViewChangeInfo {
   droppedSorts?: number;
 }
 
+/** A click, double-click or context menu on a cell: the cell's context plus the DOM event. */
+export interface CellEvent<V = unknown> extends CellContext<V> {
+  /** The column's key (tables with keyed columns). */
+  key?: string;
+  event: MouseEvent | KeyboardEvent;
+}
+
 export interface ColumnResizeInfo {
   column: number;
   key?: string;
@@ -412,6 +466,11 @@ export interface ControlledParts {
 
 export interface GridOptions<V = unknown> {
   dataSource: DataSource<V>;
+  /**
+   * A row's stable id. The selection then follows rows through sorts, filters and refreshes (instead of
+   * staying at the same position), and checked rows are kept by id. In-memory rows default to the row itself.
+   */
+  getRowId?(row: any): RowId;
   /** Table columns. For very wide tables use columnCount + getColumn instead. */
   columns?: ColumnDef<V>[];
   columnCount?: number;
@@ -447,6 +506,10 @@ export interface GridOptions<V = unknown> {
   selection?: SelectionMode;
   copy?: boolean;
   keyboard?: boolean;
+  /** Rows can be checked with a checkbox in the row-number column (header checkbox: all rows). */
+  rowSelection?: boolean;
+  /** Columns can be dragged to another place by their header (tables). Default true. */
+  reorderable?: boolean;
   /** Built-in notice for refused or failed sorts and filters (turn off if you show onViewChange yourself). */
   notices?: boolean;
 
@@ -459,6 +522,10 @@ export interface GridOptions<V = unknown> {
   defaultColumnFilter?: ColumnFilterItem[];
   /** Controlled parts only report user changes (on…Change); apply them with setSort etc. */
   controlled?: ControlledParts;
+  /** Checked rows (with rowSelection). Applied when it changes; onRowSelectionChange reports clicks. */
+  selectedRows?: RowSelection;
+  /** Column order by key (or source index for columns without a key); pinned columns stay first. */
+  columnOrder?: (string | number)[];
 
   // Grid-wide hooks (columns can override them)
   format?(value: V, ctx: CellContext<V> | null): string;
@@ -476,6 +543,13 @@ export interface GridOptions<V = unknown> {
   onSelectionChange?(info: SelectionInfo): void;
   onCopy?(info: CopyInfo): void;
   onColumnResize?(info: ColumnResizeInfo): void;
+  /** A column was dragged to another place: the new order (keys, or source indexes for unkeyed columns). */
+  onColumnOrderChange?(order: (string | number)[]): void;
+  onRowSelectionChange?(selection: RowSelection): void;
+  onCellClick?(e: CellEvent<V>): void;
+  onCellDoubleClick?(e: CellEvent<V>): void;
+  /** Right click or the context-menu key on a cell. Call e.event.preventDefault() to show your own menu. */
+  onCellContextMenu?(e: CellEvent<V>): void;
   onViewChange?(info: ViewChangeInfo): void;
   onError?(error: unknown, context: ErrorContext): void;
   onReady?(grid: Grid): void;

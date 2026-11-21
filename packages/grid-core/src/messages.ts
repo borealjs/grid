@@ -24,6 +24,8 @@ export const DEFAULT_MESSAGES: Messages = {
   clear: 'Clear',
   apply: 'Apply',
   selectAll: 'Select all',
+  selectRow: 'Select row',
+  selectAllRows: 'Select all rows',
   columns: 'Columns',
   applying: 'Applying…',
   cancel: 'Cancel',

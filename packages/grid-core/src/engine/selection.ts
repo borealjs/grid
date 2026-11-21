@@ -1,5 +1,6 @@
-// Selection geometry, in visible coordinates. Merged cells count as one cell: ranges grow to include
-// every merged cell (piece) on screen that they touch.
+// Selection geometry, in visible coordinates. A merged cell counts as one cell for the active cell and
+// for arrow keys, but ranges stay the rectangle the user drew: they never grow to cover a merged cell
+// they only touch (a merge can span thousands of rows).
 
 import type { CellPosition, SelectionRange } from '../types.js';
 import type { MergePiece } from './merges.js';
@@ -37,19 +38,16 @@ export function cellRange(pieces: readonly MergePiece[], { r, c }: CellPosition)
   return p ? { r0: p.vr0, c0: p.vc0, r1: p.vr1, c1: p.vc1 } : { r0: r, c0: c, r1: r, c1: c };
 }
 
-/** Range spanned by two cells, grown to fully include every merged cell it touches. */
-export function spanRange(pieces: readonly MergePiece[], a: CellPosition, b: CellPosition): SelectionRange {
-  const g = { r0: Math.min(a.r, b.r), c0: Math.min(a.c, b.c), r1: Math.max(a.r, b.r), c1: Math.max(a.c, b.c) };
-  for (let pass = 0; pass < 8; pass++) {
-    let grown = false;
-    for (const p of pieces) {
-      if (p.vr0 > g.r1 || p.vr1 < g.r0 || p.vc0 > g.c1 || p.vc1 < g.c0) continue;
-      if (p.vr0 < g.r0) { g.r0 = p.vr0; grown = true; }
-      if (p.vr1 > g.r1) { g.r1 = p.vr1; grown = true; }
-      if (p.vc0 < g.c0) { g.c0 = p.vc0; grown = true; }
-      if (p.vc1 > g.c1) { g.c1 = p.vc1; grown = true; }
-    }
-    if (!grown) break;
-  }
-  return g;
+/** The rectangle between two cells. */
+export const rangeOf = (a: CellPosition, b: CellPosition): SelectionRange => ({
+  r0: Math.min(a.r, b.r),
+  c0: Math.min(a.c, b.c),
+  r1: Math.max(a.r, b.r),
+  c1: Math.max(a.c, b.c),
+});
+
+/** True when the range is just the active cell: that cell alone, or the whole merged cell it is in. */
+export function isActiveOnly(pieces: readonly MergePiece[], g: SelectionRange, active: CellPosition): boolean {
+  if (g.r0 === g.r1 && g.c0 === g.c1 && g.r0 === active.r && g.c0 === active.c) return true;
+  return sameRange(g, cellRange(pieces, active));
 }

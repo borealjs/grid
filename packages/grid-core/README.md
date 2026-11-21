@@ -20,17 +20,17 @@ and any framework; React users want [`@borealjs/react-grid`](https://www.npmjs.c
 - Pivots with grouped headers, subtotals, expand and collapse
 - Range selection, copy into spreadsheets, merged cells, full keyboard support
 - Custom cells, headers, filters and empty state; CSS-variable themes, dark mode, translations
-- About 34 kB gzipped, no dependencies, TypeScript types included
+- About 40 kB gzipped, no dependencies, TypeScript types included
 
 ## Contents
 
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Without a bundler](#without-a-bundler)
-- [Columns and cells](#columns-and-cells)
+- [Columns and cells](#columns-and-cells): [pinned and reordered](#pinned-and-reordered-columns)
 - [Sorting and filtering](#sorting-and-filtering)
-- [Server data](#server-data)
-- [Selection and copy](#selection-and-copy)
+- [Server data](#server-data): [rows by offset / limit](#server-data), [cells](#cells-instead-of-rows), [row ids](#row-ids)
+- [Selection and copy](#selection-and-copy), [checkboxes](#row-checkboxes), [cell events](#cell-events)
 - [Controlled state](#controlled-state)
 - [Styling and theming](#styling-and-theming)
 - [Translations](#translations)
@@ -158,7 +158,7 @@ All three receive the same context:
 | | |
 |---|---|
 | `value` | the cell's value |
-| `row` | the whole record (with `createArraySource`; `undefined` for server data) |
+| `row` | the whole record (in-memory rows and `getRows` sources; `undefined` with `getCells`) |
 | `text` | the value after `format` |
 | `rowIndex`, `colIndex` | position on screen, after sorting and filtering |
 | `rowSource`, `colSource` | position in the data source |
@@ -170,6 +170,22 @@ the empty state. Options with the same names on the grid apply to every column t
 
 For tables with thousands of columns, pass `columnCount` and `getColumn(index)` instead of `columns`. Titles
 you leave out are loaded with the data source's `getLabels`.
+
+### Pinned and reordered columns
+
+`pinned: true` keeps a column at the start while the rest scroll sideways. Users can drag column headers to
+another place (Escape cancels); pinned columns stay together at the start.
+
+```js
+createGrid(el, {
+  dataSource,
+  columns: [{ key: 'id', pinned: true }, { key: 'name', pinned: true }, { key: 'amount' }, { key: 'actions', reorderable: false }],
+  columnOrder: saved,                                   // keys in display order
+  onColumnOrderChange: (order) => localStorage.setItem('order', JSON.stringify(order)),
+});
+```
+
+`reorderable: false` on the grid turns dragging off; `grid.setColumnOrder(keys)` reorders from code.
 
 ## Sorting and filtering
 
@@ -239,27 +255,17 @@ receives `{ key: 'score', op: 'atLeast', value: 72 }` in the query's filter list
 
 ## Server data
 
-A data source is an object with async callbacks. Only `getCells` is required. The grid asks only for what is
-on screen, and every call gets an `AbortSignal`: pass it to `fetch` so requests the grid no longer needs are
-cancelled.
+Most backends serve rows by offset and limit. Give the grid a `getRows` callback: it asks for the pages on
+screen, reads each cell from the row by its column `key` (or `value(row)`), and gives cells and events the whole
+row. Every call gets an `AbortSignal`: pass it to `fetch` so requests the grid no longer needs are cancelled.
 
 ```js
 const dataSource = {
-  // How many rows match the current filter.
-  async getLayout({ query, signal }) {
-    const res = await fetch(`/api/orders/count?q=${encodeURIComponent(JSON.stringify(query))}`, { signal });
-    return { rowCount: (await res.json()).count };
-  },
-
-  // The cells of one or more rectangles.
-  async getCells({ rects, query, signal }) {
-    const res = await fetch('/api/orders/cells', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rects, query }),
-      signal,
-    });
-    return (await res.json()).cells; // one entry per rect: [[a, b], [c, d]]
+  // Rows offset … offset + limit - 1 of the sorted, filtered result, and how many rows match.
+  async getRows({ offset, limit, sort, filter, signal }) {
+    const params = new URLSearchParams({ offset, limit, sort: JSON.stringify(sort), filter: JSON.stringify(filter) });
+    const res = await fetch(`/api/orders?${params}`, { signal });
+    return res.json(); // { rows: [{ id: 1, product: 'Lamp', total: 120 }, …], total: 48213 }
   },
 
   // Optional: values for value-list filters.
@@ -269,47 +275,73 @@ const dataSource = {
   },
 };
 
-createGrid(el, { dataSource, columns });
+createGrid(el, { dataSource, columns, getRowId: (row) => row.id });
 ```
 
-A rect is `{ row, col, rowCount, colCount }`. Rows are positions in the sorted and filtered result; columns
-are column indexes. Answer each rect with its rows of values (`[[a, b], [c, d]]`) or one flat row-major
-array (`[a, b, c, d]`).
-
-The query describes the current sort and filters:
+`limit` is the page size (100). `sort` and `filter` name columns by `key`:
 
 ```js
-{
-  sort: [{ column: 3, key: 'amount', direction: 'desc' }],
-  filter: [
-    { column: 3, key: 'amount', op: 'range', min: 0, max: 100 },   // numbers, or dates as 'YYYY-MM-DD'
-    { column: 2, key: 'status', op: 'in', values: ['Open'] },      // also 'notin'
-    { column: 1, key: 'name', op: 'contains', text: 'ada' },
-    { column: 7, key: 'score', op: 'atLeast', value: 90 },         // custom filters
-  ],
-  columnFilter: [],                                                 // which column groups are shown
-}
+sort: [{ key: 'amount', direction: 'desc' }],
+filter: [
+  { key: 'amount', op: 'range', min: 0, max: 100 },   // numbers, or dates as 'YYYY-MM-DD'
+  { key: 'status', op: 'in', values: ['Open'] },      // also 'notin'
+  { key: 'name', op: 'contains', text: 'ada' },
+  { key: 'score', op: 'atLeast', value: 90 },         // custom filters
+],
 ```
 
 With SQL, `filter` becomes a parameterized `WHERE`, `sort` becomes `ORDER BY` (add a unique column last so the
-order is stable), and a rect becomes rows `row` to `row + rowCount - 1` of that order. Map `key` to column
-names through an allow-list on the server; never put client text into SQL.
+order is stable) and `offset` / `limit` become `OFFSET` / `LIMIT`. Map `key` to column names through an
+allow-list on the server; never put client text into SQL. `createRowSource({ getRows, columns, pageSize })`
+makes the same data source explicitly, to share it or set the page size.
+
+### Cells instead of rows
+
+Pivots and tables with thousands of columns ask for rectangles of cells instead: give `getCells` and
+`getLayout` in place of `getRows`.
+
+```js
+const dataSource = {
+  async getLayout({ query, signal }) {                    // how many rows match the current filter
+    const res = await fetch(`/api/orders/count?q=${encodeURIComponent(JSON.stringify(query))}`, { signal });
+    return { rowCount: (await res.json()).count };
+  },
+  async getCells({ rects, query, signal }) {              // the cells of one or more rectangles
+    const res = await fetch('/api/orders/cells', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rects, query }), signal,
+    });
+    return (await res.json()).cells; // one entry per rect: [[a, b], [c, d]]
+  },
+};
+```
+
+A rect is `{ row, col, rowCount, colCount }`: rows are positions in the sorted and filtered result, columns
+are column indexes (the query's items carry both `column` and `key`). Answer each rect with its rows of values
+(`[[a, b], [c, d]]`) or one flat row-major array.
+
+### Row ids
+
+Give each row a stable id with `getRowId(row)` and the grid keeps track of rows, not positions: after a sort,
+a filter or `refresh()`, the selection stays on the row it was on (and moves to the first row if that row is
+gone), and checked rows are remembered by id. In-memory rows default to the row object itself. With `getRows`,
+a moved row is found among the loaded pages; to find rows further away, add `indexOfRow(id, query)` to the
+data source (the row's position, or -1).
 
 ### Slow sorts and filters
 
 Sorting or filtering a huge table can take a while. When it takes more than a moment, the grid shows what it
-is doing with a Cancel button (in the filter dialog, or in a notice for sorts). `getLayout` receives an
-`onProgress` callback to say how far it is; cancelling aborts its `signal`, so pass that on to `fetch` or
-your database query:
+is doing with a Cancel button (in the filter dialog, or in a notice for sorts). The request that applies it
+(`getRows` for the first page, or `getLayout`) receives an `onProgress` callback to say how far it is;
+cancelling aborts its `signal`, so pass that on to `fetch` or your database query:
 
 ```js
-async getLayout({ query, signal, onProgress }) {
-  const job = await startCount(query, { signal });
+async getRows({ offset, limit, sort, filter, signal, onProgress }) {
+  const job = await startQuery({ sort, filter }, { signal });
   while (!job.done) {
-    onProgress({ phase: 'Checking rows', done: job.checked, total: job.rows }); // "Filtering… Checking rows · 42% · 7 s"
+    onProgress?.({ phase: 'Checking rows', done: job.checked, total: job.rows }); // "Filtering… Checking rows · 42% · 7 s"
     await job.next();
   }
-  return { rowCount: job.count };
+  return job.page(offset, limit); // { rows, total }
 }
 ```
 
@@ -317,13 +349,14 @@ async getLayout({ query, signal, onProgress }) {
 `{ cancelled: true }` if it is stopped.
 
 If your backend can't sort or filter very large tables at all, return `maxSortRows` / `maxFilterRows` from
-`getLayout`. The grid then explains the limit to the user instead of sending requests that would fail.
+`getLayout` (with `getCells`). The grid then explains the limit to the user instead of sending requests that would fail.
 
 ### Ready-made sources
 
 - **`createArraySource(rows, options)`** sorts, filters and searches rows in memory (objects, or arrays
   addressed by position). Text sorts naturally ("Item 2" before "Item 10") and empty values go last. After
   `source.setRows(newRows)`, call `grid.refresh()`.
+- **`createRowSource({ getRows, columns, pageSize, indexOfRow })`** loads rows by offset / limit, as above.
 - **`createHttpSource({ baseUrl, params, headers, fetch })`** talks to a server that implements this HTTP
   API. `params` are added to every request. The query is sent as `sort` (for example `3:d,L1:a`: a column
   index, or `L` and a pivot row level, then `a` or `d`) and as `filter` / `colfilter` (JSON lists of
@@ -353,6 +386,42 @@ createGrid(el, {
   onCopy: (info) => console.log(`Copied ${info.cells} cells`),
 });
 ```
+
+### Row checkboxes
+
+`rowSelection: true` adds a checkbox to each row number; the one in the corner checks every row. Shift+click
+checks a range, and Space checks the active row.
+
+```js
+const grid = createGrid(el, {
+  dataSource, columns, getRowId: (row) => row.id,
+  rowSelection: true,
+  onRowSelectionChange: (sel) => console.log(sel), // { all: false, ids: [3, 7] } or { all: true, except: [12] }
+});
+grid.setRowSelection({ all: false, ids: [3] });
+```
+
+`{ all: true, except }` means every row matching the filter except those: it works for a billion rows, where
+listing ids would not. Without `getRowId`, rows are kept by position and the checks clear when the sort or
+filter changes.
+
+### Cell events
+
+```js
+createGrid(el, {
+  dataSource, columns,
+  onCellClick: ({ row, key, value }) => showDetail(row),
+  onCellDoubleClick: ({ row }) => openEditor(row),
+  onCellContextMenu: ({ row, event }) => {
+    event.preventDefault();              // instead of the browser's menu
+    showMenu(event.clientX, event.clientY, row);
+  },
+});
+```
+
+Each event gets the cell's context (`row`, `value`, `text`, `rowIndex`, `column`, …), its `key` and the DOM
+`event`. A right click outside the selection selects the cell first, and the context-menu key (or Shift+F10)
+opens the menu for the active cell. Clicks on links, buttons and inputs in cells are theirs, not cell clicks.
 
 ## Controlled state
 
@@ -466,6 +535,7 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | Option | Type | Default | |
 |---|---|---|---|
 | `dataSource` | `DataSource` | required | where the data comes from ([server data](#server-data), [ready-made sources](#ready-made-sources)) |
+| `getRowId` | `(row) => string \| number` | in-memory: the row itself | stable row ids ([row ids](#row-ids)) |
 | `columns` | `ColumnDef[]` | | the columns ([column options](#column-options)) |
 | `columnCount`, `getColumn` | `number`, `(index) => ColumnDef` | | instead of `columns`, for thousands of columns |
 | `rowCount` | `number` | | row count when the data source has no `getLayout` (filtering is then off) |
@@ -485,6 +555,8 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `keyboard` | `boolean` | `true` | keyboard navigation |
 | `notices` | `boolean` | `true` | short messages in the grid: copies, and slow, refused or failed sorts and filters; turn it off to show `onCopy` / `onViewChange` yourself |
 | `columnChooser` | `boolean` | on when columns have a `group` | a corner menu to show and hide column groups |
+| `rowSelection` | `boolean` | `false` | [row checkboxes](#row-checkboxes) |
+| `reorderable` | `boolean` | `true` | drag column headers to reorder |
 
 #### Look
 
@@ -509,6 +581,8 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 |---|---|---|
 | `sort`, `filter`, `columnFilter` | `SortItem[]`, `FilterItem[]`, `ColumnFilterItem[]` | the starting sort and filters |
 | `controlled` | `{ sort?, filter?, columnFilter? }` | make them [controlled](#controlled-state) |
+| `selectedRows` | `{ all: false, ids } \| { all: true, except }` | checked rows (applied when it changes) |
+| `columnOrder` | `(string \| number)[]` | column keys in display order |
 
 #### Events
 
@@ -520,6 +594,9 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `onSelectionChange` | `{ active, text, ranges, rows, cols, cells }` |
 | `onCopy` | `{ ok, cells, rows, cols, ms, reason? }` |
 | `onColumnResize` | `{ column, key, width }`, when the user lets go |
+| `onColumnOrderChange` | column keys in their new order, after a drag |
+| `onRowSelectionChange` | `{ all, ids }` or `{ all, except }` |
+| `onCellClick`, `onCellDoubleClick`, `onCellContextMenu` | the cell's context plus `key` and `event` ([cell events](#cell-events)) |
 | `onViewChange` | `{ what, pending, progress? }` while a sort or filter runs, then `{ what, ok, rows, reason? }` or `{ what, cancelled: true }` |
 | `onError` | `(error, { kind: 'layout' \| 'cells' \| 'labels' })`; errors are logged when this is not set |
 | `onReady` | `(grid)` once the grid is drawn |
@@ -535,6 +612,8 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `align` | `'start' \| 'end' \| 'center'` | |
 | `filter` | see [sorting and filtering](#sorting-and-filtering) | |
 | `sortable`, `resizable`, `hidden` | `boolean` | |
+| `pinned` | `boolean` | stays at the start while scrolling sideways |
+| `reorderable` | `boolean` | `false`: cannot be dragged elsewhere |
 | `group` | `string` | group name for the column chooser |
 | `format` | `(value, ctx) => string` | text shown in the cell |
 | `cellClass` | `(value, ctx) => string` | a class per cell |
@@ -551,6 +630,9 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `ready` | a promise that resolves once the grid is drawn |
 | `setOptions(partial)` | change any option; scroll position, sort and filters are kept |
 | `refresh()` | reload the visible data (it changed on the server) |
+| `getRow(rowIndex)` | the record behind a visible row, when loaded |
+| `getRowSelection()`, `setRowSelection(sel)` | checked rows |
+| `getColumnOrder()`, `setColumnOrder(keys)` | column order |
 | `repaint()` | redraw cells (your `format` or `renderCell` output changed) |
 | `getQuery()`, `getSort()`, `getFilter()`, `getColumnFilter()` | the current sort and filters |
 | `setSort(sort)`, `setFilter(filter)`, `setColumnFilter(list)` | change them; resolve to `false` if refused |
@@ -572,11 +654,14 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 
 | Member | | |
 |---|---|---|
-| `getCells({ rects, query, signal })` | required | cells for each rect |
-| `getLayout({ query, signal, onProgress })` | needed for filtering and pivots | `{ rowCount, totalRowCount?, maxSortRows?, maxFilterRows? }` or a pivot layout; may report [progress](#slow-sorts-and-filters) |
+| `getRows({ offset, limit, sort, filter, query, signal, onProgress? })` | this or `getCells` | `{ rows, total, totalUnfiltered? }` |
+| `getCells({ rects, query, signal })` | this or `getRows` | cells for each rect |
+| `getLayout({ query, signal, onProgress })` | with `getCells`: needed for filtering and pivots | `{ rowCount, totalRowCount?, maxSortRows?, maxFilterRows? }` or a pivot layout; may report [progress](#slow-sorts-and-filters) |
+| `indexOfRow(id, query, getRowId)` | optional | a row's position in the view, or -1 ([row ids](#row-ids)) |
 | `getFilterValues({ column, key, search, limit, query, signal })` | optional | `{ values, total?, matches? }` |
 | `getLabels({ axis, level, start, count, query, signal })` | optional | header titles you did not put in the columns |
 | `maxRectsPerRequest`, `maxCellsPerRequest` | optional | at most this many rects (default 400) or cells (default 20,000) per `getCells` call |
+| `clearCache()` | optional | drop cached data (`refresh()` calls it) |
 
 ### TypeScript
 

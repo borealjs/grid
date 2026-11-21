@@ -32,6 +32,10 @@ interface SpanEntry {
   toggle: string;
   range: string;
   hidden: boolean;
+  /** Row checkbox (rowSelection), created on first use. */
+  check: HTMLInputElement | null;
+  chk: string;
+  movable: boolean;
 }
 
 export interface SpanRenderContext {
@@ -58,6 +62,8 @@ export class SpanLayer {
   /** The grid-wide header renderer, used when `hasRenderer()` and a segment has none of its own. */
   renderHeader: Renderer<HeaderContext> | null = null;
   hasRenderer: () => boolean = () => false;
+  /** Accessible name of row checkboxes. */
+  checkLabel = 'Select row';
   live = new Map<string | number, SpanEntry>();
   free: SpanEntry[] = [];
 
@@ -94,6 +100,7 @@ export class SpanLayer {
     return {
       el, label, text, box: null, cleanup: undefined, rsig: '', sortBtn, filterBtn, sort: '', filter: '',
       pos: NaN, cpos: NaN, size: NaN, csize: NaN, lh: NaN, shift: 0, cls: '', str: null, item: '', toggle: '', range: '', hidden: false,
+      check: null, chk: '', movable: false,
     };
   }
 
@@ -144,7 +151,7 @@ export class SpanLayer {
         e.shift = shift;
       }
       const pending = seg.label === undefined;
-      const cls = `vg-seg${seg.cls ? ` ${seg.cls}` : ''}${pending ? ' vg-ph' : ''}${seg.selected ? ' vg-sel' : ''}${this.withSort && seg.sort ? ' vg-sortable' : ''}${this.withSort && seg.filter ? ' vg-filterable' : ''}`;
+      const cls = `vg-seg${seg.cls ? ` ${seg.cls}` : ''}${pending ? ' vg-ph' : ''}${seg.selected ? ' vg-sel' : ''}${this.withSort && seg.sort ? ' vg-sortable' : ''}${this.withSort && seg.filter ? ' vg-filterable' : ''}${seg.check ? ' vg-checked' : ''}`;
       if (cls !== e.cls) {
         e.el.className = cls;
         e.cls = cls;
@@ -182,6 +189,31 @@ export class SpanLayer {
           e.el.removeAttribute('aria-expanded');
         }
         e.toggle = toggle + expanded;
+      }
+      const chk = seg.check === undefined ? '' : seg.check ? '1' : '0';
+      if (chk !== e.chk) {
+        if (chk && !e.check) {
+          const box = document.createElement('input');
+          box.type = 'checkbox';
+          box.className = 'vg-check';
+          box.tabIndex = -1;
+          box.setAttribute('aria-label', this.checkLabel);
+          e.el.insertBefore(box, e.el.firstChild);
+          e.check = box;
+        }
+        if (e.check) {
+          e.check.hidden = !chk;
+          e.check.checked = chk === '1';
+        }
+        e.chk = chk;
+      }
+      // A click toggles the box natively; keep it equal to the grid's state.
+      if (e.check && chk && e.check.checked !== (chk === '1')) e.check.checked = chk === '1';
+      const movable = !!seg.movable && seg.a === seg.b;
+      if (movable !== e.movable) {
+        if (movable) e.el.dataset.move = '1';
+        else delete e.el.dataset.move;
+        e.movable = movable;
       }
       if (this.withSort) this.#paintControls(e, seg);
       if (this.withGrip) {
