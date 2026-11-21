@@ -50,6 +50,11 @@ const grid = createGrid(document.getElementById('grid'), {
   dataSource: source,
   ...shape,
   notices: false, // this page shows its own toasts
+  // The row limits are this demo backend's (it scans rows, with no index), not the grid's.
+  messages: {
+    filterLimit: (limit, total) => `This demo's backend filters up to ${fmt.format(limit)} rows by scanning them, and this table has ${fmt.format(total)}. A backend with database indexes can filter tables of any size. Set fewer rows above to try filtering here.`,
+    sortLimit: (limit, total) => `This demo's backend sorts by several columns up to ${fmt.format(limit)} rows, and this table has ${fmt.format(total)}. A backend with database indexes can do it at any size. Set fewer rows above to try it here.`,
+  },
   onViewChange: (info) => {
     if (info.pending) return showToast(info.what === 'sort' ? 'Sorting…' : 'Filtering…');
     if (!info.ok) return showToast(info.reason, true);

@@ -41,8 +41,8 @@ export const DEFAULT_MESSAGES = {
   selectAll: 'Select all',
   columns: 'Columns',
   applying: 'Applying…',
-  filterLimit: (limit, total) => `Filtering isn't available here: the data source filters at most ${limit.toLocaleString()} rows (this table has ${total.toLocaleString()})`,
-  sortLimit: (limit, total) => `Sorting by several columns isn't available here: the data source sorts at most ${limit.toLocaleString()} rows that way (this table has ${total.toLocaleString()})`,
+  filterLimit: (limit, total) => `Filtering is turned off for this table. Its server filters up to ${limit.toLocaleString()} rows, and this table has ${total.toLocaleString()}.`,
+  sortLimit: (limit, total) => `Sorting by more than one column is turned off for this table. Its server sorts that way up to ${limit.toLocaleString()} rows, and this table has ${total.toLocaleString()}.`,
   failed: (what, reason) => `${what === 'sort' ? 'Sorting' : 'Filtering'} failed: ${reason}`,
 };
 

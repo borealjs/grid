@@ -304,6 +304,13 @@ function PivotDemo({ theme }) {
 
 // ------------------------------------------------------------------ server table, a billion rows
 
+// The row limits are this demo backend's (it scans rows, with no index), not the grid's.
+const fmtRows = (n) => n.toLocaleString();
+const DEMO_LIMITS = {
+  filterLimit: (limit, total) => `This demo's backend filters up to ${fmtRows(limit)} rows by scanning them, and this table has ${fmtRows(total)}. A backend with database indexes can filter tables of any size. The other tabs show filtering.`,
+  sortLimit: (limit, total) => `This demo's backend sorts by several columns up to ${fmtRows(limit)} rows, and this table has ${fmtRows(total)}. A backend with database indexes can do it at any size.`,
+};
+
 function HugeTableDemo({ theme }) {
   const source = useMemo(() => serverSource({ mode: 'flat', rows: 1_000_000_000, cols: 1_000_000, latency: 40 }), []);
   const [layout, setLayout] = useState(null);
@@ -334,6 +341,7 @@ function HugeTableDemo({ theme }) {
         getColumn={getColumn}
         columnChooser
         columnGroups={layout.meta.columnTypes}
+        messages={DEMO_LIMITS}
         theme={theme}
       />
     </section>
