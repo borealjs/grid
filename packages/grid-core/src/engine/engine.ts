@@ -22,7 +22,7 @@ import {
   sameSortKey, sortParamOf, sortToPublic, viewKeyId, type Condition, type SortDir, type SortSpec, type ViewKey,
 } from '../query.js';
 import type {
-  CellClassResult, CellContext, CellEvent, CellPosition, ColumnDef, ColumnFilterItem, ColumnResizeInfo, ControlledParts, CopyInfo, EmptyContext,
+  CellClassResult, CellContext, CellEvent, CellPosition, ColumnDef, ColumnDescription, ColumnFilterItem, ColumnResizeInfo, ControlledParts, CopyInfo, EmptyContext,
   ErrorContext, FilterItem, FilterTarget, GridStats, HeaderContext, Messages, Progress, Query, Renderer, RowId, RowSelection, Selection, SelectionInfo,
   SelectionMode, SelectionRange, SortItem, SortTarget, Theme, ViewChangeInfo, ViewWork,
 } from '../types.js';
@@ -127,17 +127,19 @@ export interface EngineOptions {
   renderEmpty?: Renderer<EmptyContext>;
   /** The data record at a row source position (cell renderers' ctx.row). */
   rowAt?(position: number): unknown;
+  /** Descriptions of columns from … from + n - 1 (getColumns), for models with describedColumns. */
+  fetchColumns?(request: FetchContext & { from: number; n: number }): Promise<ColumnDescription[]>;
   /** Id of the row at a source position, when its record is loaded (getRowId). */
   rowId?(position: number): RowId | undefined;
-  /** Source position of a row id in the current view, or -1 when it is gone or unknown. */
-  findRow?(id: RowId): number | Promise<number>;
+  /** Source position of a row id under a query: -1 when it is not in that view, null when it cannot be told. */
+  findRow?(id: RowId, query: Query): number | null | Promise<number | null>;
   /** Row checkboxes in the row-number column. */
   rowSelection?: boolean;
   selectedRows?: RowSelection;
   /** Whether an event callback is set (the Grid passes stable wrappers for all of them). */
   hasHandler?(name: 'onCellClick' | 'onCellDoubleClick' | 'onCellContextMenu'): boolean;
-  /** New column order, as source indexes. */
-  onColumnOrderChange?(order: number[]): void;
+  /** New column order, compact: source indexes and inclusive [first, last] runs. */
+  onColumnOrderChange?(order: (number | [number, number])[]): void;
   onRowSelectionChange?(selection: RowSelection): void;
   onCellClick?(e: CellEvent): void;
   onCellDoubleClick?(e: CellEvent): void;
@@ -254,6 +256,12 @@ export interface EngineStats {
   rowWrites: number;
   cellWrites: number;
 }
+
+/** One step of row checking, with its query's signature (internal). */
+type CheckStep = ({ id: RowId; at?: number; atSig?: string } | { from: number; to: number; query: Query }) & { checked: boolean; sig?: string };
+
+const querySig = (q: Query): string => JSON.stringify([q.sort, q.filter]);
+const MAX_POSITIONS = 20_000;
 
 const ARROWS: Record<string, [number, number]> = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
 
@@ -380,11 +388,24 @@ export class GridEngine {
   /** Merges whose top-left cell is not loaded yet ("rs:cs"). */
   #mergeAnchors = new Set<string>();
   #pinSig = '';
+  /** Column descriptions arrived: redraw every cell once they are stored. */
+  #describedPending = false;
+  /** Source columns the user resized (widths from descriptions do not replace them). */
+  #userWidths = new Set<number>();
   /** The active row's id, noted when the selection moved there (so it survives data changes). */
   #activeRow: { r: number; id: RowId } | null = null;
   #followSeq = 0;
-  /** Checked rows: ids (or, with `all`, the exceptions). Without row ids, keys are positions. */
-  #rowSel: { all: boolean; set: Set<RowId> } = { all: false, set: new Set() };
+  /** Checked rows: steps in order, the last one covering a row decides (see RowSelection). */
+  #checks: CheckStep[] = [];
+  /** Positions of rows under other queries (for checks made in another sort / filter): sig -> id -> position. */
+  #positions = new Map<string, Map<RowId, number | null | 'pending'>>();
+  /** A checked row could not be placed in this view (no ids, or the source cannot find rows). */
+  #checksUnknown = false;
+  #checksNoticeShown = false;
+  /** The user (or code) chose a selection; until then a sort does not need to keep it on a row. */
+  #userSelected = false;
+  /** Why the selection moved by itself, reported once with the next onSelectionChange. */
+  #moveReason: SelectionInfo['moved'];
   #lastCheck = -1;
   #cornerCheck: HTMLInputElement | null = null;
   #suppressHeadClick = false;
@@ -412,6 +433,13 @@ export class GridEngine {
     }
     this.msg = { ...DEFAULT_MESSAGES, ...o.messages };
     const model = (this.model = o.model);
+    // Described columns: the model reads what is loaded; titles and descriptions come in the same blocks.
+    if (model.describedColumns) {
+      model.describe = (src) => {
+        const b = this.colLabels?.get(labelKey('cols', 0, src)) as (LabelBlock & { metas?: ColumnDescription[] }) | undefined;
+        return b?.metas?.[src - b.from] ?? (b ? {} : undefined);
+      };
+    }
     this.rows = model.rows;
     this.cols = model.cols;
     this.rowSource = model.rowSource ?? ((r) => r);
@@ -470,6 +498,7 @@ export class GridEngine {
 
   setColumnWidth(col: number, width: number): void {
     if (typeof this.cols.setSize !== 'function') return;
+    this.#userWidths.add(this.colSource(col));
     const w = Math.max(this.o.minColWidth, Math.round(width));
     if (w === this.cols.sizeOf(col)) return;
     this.cols.setSize(col, w);
@@ -593,8 +622,9 @@ export class GridEngine {
     this.colLabels = null;
     this.#useColLabels();
     this.#useView();
+    this.#positions.clear(); // the data changed: positions found earlier may be stale
     this.#structureChanged();
-    this.#followRow(snap);
+    this.#followRow(snap, true);
     this.repaint();
   }
 
@@ -721,6 +751,8 @@ export class GridEngine {
       const kept = sortList.filter((x) => x.key.col === undefined);
       dropped = sortList.length - kept.length;
       sortList = kept;
+      // Tables with described columns: filters on columns point at old column numbers too.
+      if (this.model.describedColumns) filterList = filterList.filter((f) => f.c === undefined);
     }
     const sortParam = sortParamOf(sortList);
     const filterParam = filterParamOf(filterList);
@@ -786,7 +818,7 @@ export class GridEngine {
     this.#useColLabels();
     this.#useView();
     this.#structureChanged();
-    this.#followRow(follow);
+    this.#followRow(follow, false);
     this.#renderCornerSort();
     this.scrollToVirtual(this.vx, this.vy);
     this.o.onViewChange?.({
@@ -903,6 +935,23 @@ export class GridEngine {
     return this.model.serverColFilter ? this.colFilterParam : '';
   }
 
+  /** Descriptions for source columns from … arrived: forget what was built without them, apply widths. */
+  #columnsDescribed(from: number, metas: ColumnDescription[]): void {
+    this.model.columnsDescribed?.(from, metas.length);
+    const cols = this.cols as { setSourceSizes?(entries: [number, number][]): void };
+    const sizes: [number, number][] = [];
+    metas.forEach((m, i) => {
+      const src = from + i;
+      if (typeof m.width === 'number' && m.width > 0 && !this.#userWidths.has(src)) sizes.push([src, Math.max(this.o.minColWidth, Math.round(m.width))]);
+    });
+    if (sizes.length && cols.setSourceSizes) {
+      cols.setSourceSizes(sizes);
+      this.#updateContentSize();
+      this.#ensurePools();
+    }
+    this.#describedPending = true;
+  }
+
   /** After a failed request: try again in a moment (the wish list is sent again). */
   #retrySoon(): void {
     clearTimeout(this.#retryTimer);
@@ -916,7 +965,16 @@ export class GridEngine {
     const sig = this.#serverColFilter;
     let cache = this.#colLabelCaches.get(sig);
     if (!cache) {
-      cache = new BlockCache<LabelBlock>({ maxEntries: 2000, onLoad: () => this.invalidate() });
+      cache = new BlockCache<LabelBlock>({
+        maxEntries: 2000,
+        // Column descriptions change formats, alignment and widths: redraw the cells, not just the headers.
+        onLoad: () => {
+          if (this.#describedPending) {
+            this.#describedPending = false;
+            this.repaint();
+          } else this.invalidate();
+        },
+      });
       this.#colLabelCaches.set(sig, cache);
       trimOldest(this.#colLabelCaches, MAX_VIEWS);
     }
@@ -1465,7 +1523,7 @@ export class GridEngine {
     this.#activeRow = id === undefined ? null : { r, id };
   }
 
-  /** The active row's id and column, before a sort, filter or refresh. */
+  /** The active row's id and column, before a sort, filter or refresh (null when it is not known). */
   rowSnapshot(): { id: RowId; c: number } | null {
     this.#noteActiveRow();
     const a = this.#activeRow;
@@ -1473,66 +1531,150 @@ export class GridEngine {
   }
 
   /**
-   * After the rows changed order or content: put the selection back on the row it was on (found by id),
-   * or on the first row when that row is gone. Without row ids the selection keeps its position.
+   * After the rows changed order or content, put the selection back on the row it was on (found by id).
+   * When that row is not in the view any more, or the grid cannot tell where it went, the selection moves
+   * to the first row and a notice says why (messages.selectionRowGone / selectionNotFollowed). A refresh
+   * without row ids keeps the position (the order is the same).
    */
-  #followRow(snap: { id: RowId; c: number } | null): void {
+  #followRow(snap: { id: RowId; c: number } | null, refresh: boolean): void {
     this.#clampSelection();
-    if (this.#checksOn() && !this.o.rowId) this.#rowSel = { all: false, set: new Set() }; // positions changed
-    if (!snap || !this.o.findRow) return;
-    const seq = ++this.#followSeq;
-    const apply = (pos: number) => {
-      if (seq !== this.#followSeq || this.rows.count === 0) return;
-      const cell = this.#clampCell({ r: pos >= 0 ? pos : 0, c: snap.c });
+    this.#checksUnknown = false;
+    this.#checksNoticeShown = false;
+    const table = this.model.hostClass === 'vg-table';
+    if (!table || !this.#userSelected || this.rows.count === 0) return;
+    const c = snap?.c ?? this.sel.active.c;
+    const toFirst = (why: 'rowGone' | 'notFollowed') => {
+      const cell = this.#clampCell({ r: 0, c });
       this.sel = { active: cell, anchor: cell, focus: cell, ranges: [rangeOf(cell, cell)] };
-      this.#activeRow = pos >= 0 ? { r: cell.r, id: snap.id } : null;
+      this.#moveReason = why;
+      this.notify(why === 'rowGone' ? this.msg.selectionRowGone : this.msg.selectionNotFollowed, false);
+      this.#reveal(cell);
       this.#selectionChanged();
     };
-    let res: number | Promise<number>;
-    try {
-      res = this.o.findRow(snap.id);
-    } catch {
-      res = -1;
+    if (!snap) {
+      if (!refresh) toFirst('notFollowed');
+      return;
     }
-    if (typeof res === 'number') apply(res);
-    else res.then(apply, () => apply(-1));
+    if (!this.o.findRow) {
+      toFirst('notFollowed');
+      return;
+    }
+    const seq = ++this.#followSeq;
+    const query = this.query;
+    const apply = (pos: number | null) => {
+      if (seq !== this.#followSeq || this.rows.count === 0) return;
+      if (pos === null || !(pos >= 0) || pos >= this.rows.count) {
+        toFirst(pos === -1 ? 'rowGone' : 'notFollowed');
+        return;
+      }
+      const cell = this.#clampCell({ r: pos, c });
+      this.sel = { active: cell, anchor: cell, focus: cell, ranges: [rangeOf(cell, cell)] };
+      this.#selectionChanged();
+      this.#activeRow = { r: cell.r, id: snap.id };
+    };
+    let res: number | null | Promise<number | null>;
+    try {
+      res = this.o.findRow(snap.id, query);
+    } catch {
+      res = null;
+    }
+    if (res instanceof Promise) res.then(apply, () => apply(null));
+    else apply(res);
   }
 
   // ---------------------------------------------------------------- row checkboxes
+  //
+  // Checked rows are a list of steps: a row by id, or a range of positions in the order of some sort and
+  // filter. The last step covering a row decides. A range costs the same for 10 rows or 50 million, so
+  // checking works the same at any size without loading rows. Rows of another sort / filter are placed
+  // by looking up their position there (indexOfRow), a screenful at a time.
 
   #checksOn(): boolean {
     return !!this.o.rowSelection && this.model.hostClass === 'vg-table';
   }
 
-  /** Key of a row for checking: its id, or (without row ids) its position. undefined while not loaded. */
-  #rowKey(r: number): RowId | undefined {
-    const rs = this.rowSource(r);
-    return this.o.rowId ? this.o.rowId(rs) : rs;
+  #rowIdAt(r: number): RowId | undefined {
+    return this.o.rowId ? this.o.rowId(this.rowSource(r)) : undefined;
+  }
+
+  #sigOf(step: CheckStep): string {
+    if (step.sig === undefined && 'query' in step) step.sig = querySig(step.query);
+    return step.sig ?? '';
+  }
+
+  /** Position of a row under another query, from the cache; asks for it (and redraws later) when missing. */
+  #positionIn(sig: string, query: Query, id: RowId): number | null | undefined {
+    let m = this.#positions.get(sig);
+    if (!m) {
+      m = new Map();
+      this.#positions.set(sig, m);
+      while (this.#positions.size > 8) this.#positions.delete(this.#positions.keys().next().value as string);
+    }
+    const hit = m.get(id);
+    if (hit === 'pending') return undefined;
+    if (hit !== undefined) return hit;
+    if (!this.o.findRow) return null;
+    const map = m;
+    const store = (pos: number | null) => {
+      if (map.size > MAX_POSITIONS) map.delete(map.keys().next().value as RowId);
+      map.set(id, typeof pos === 'number' ? pos : null);
+      this.anchorRow = null;
+      this.invalidate();
+    };
+    let res: number | null | Promise<number | null>;
+    try {
+      res = this.o.findRow(id, query);
+    } catch {
+      res = null;
+    }
+    if (res instanceof Promise) {
+      map.set(id, 'pending');
+      res.then(store, () => store(null));
+      return undefined;
+    }
+    map.set(id, typeof res === 'number' ? res : null);
+    return map.get(id) as number | null;
   }
 
   #isChecked(r: number): boolean {
-    const key = this.#rowKey(r);
-    const { all, set } = this.#rowSel;
-    if (all) return key === undefined || !set.has(key);
-    return key !== undefined && set.has(key);
+    const steps = this.#checks;
+    if (!steps.length) return false;
+    const sig = querySig(this.query);
+    let id: RowId | undefined | null = null; // null = not read yet
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const step = steps[i];
+      if ('id' in step) {
+        if (id === null) id = this.#rowIdAt(r);
+        if (id !== undefined && id === step.id) return step.checked;
+        continue;
+      }
+      if (this.#sigOf(step) === sig) {
+        if (r >= step.from && r <= step.to) return step.checked;
+        continue;
+      }
+      // A range from another sort / filter: where was this row there?
+      if (id === null) id = this.#rowIdAt(r);
+      if (id === undefined) {
+        // No ids at all: these checks cannot be placed. (An id that is not loaded yet comes with the data.)
+        if (!this.o.rowId) this.#checksUnknown = true;
+        continue;
+      }
+      const pos = this.#positionIn(this.#sigOf(step), step.query, id);
+      if (pos === null) this.#checksUnknown = true;
+      else if (pos !== undefined && pos >= step.from && pos <= step.to) return step.checked;
+    }
+    return false;
   }
 
-  #setChecked(r: number, on: boolean): void {
-    const key = this.#rowKey(r);
-    if (key === undefined) return;
-    const { all, set } = this.#rowSel;
-    if (on !== all) set.add(key);
-    else set.delete(key);
-  }
-
+  /** Checked rows as steps, in order (the last step covering a row decides). */
   getRowSelection(): RowSelection {
-    const { all, set } = this.#rowSel;
-    return all ? { all: true, except: [...set] } : { all: false, ids: [...set] };
+    return { checks: this.#checks.map((st) => ('id' in st ? { id: st.id, checked: st.checked } : { from: st.from, to: st.to, query: st.query, checked: st.checked })) };
   }
 
   setRowSelection(sel: RowSelection | null | undefined): void {
-    const next = sel && sel.all ? { all: true, set: new Set<RowId>(sel.except ?? []) } : { all: false, set: new Set<RowId>((sel as { ids?: RowId[] } | null)?.ids ?? []) };
-    this.#rowSel = next;
+    // The same checks coming back (a controlled prop echoing onRowSelectionChange) keep what the grid knows about them.
+    if (JSON.stringify(sel?.checks ?? []) === JSON.stringify(this.getRowSelection().checks)) return;
+    this.#checks = (sel?.checks ?? []).map((st) => ({ ...st }));
     this.anchorRow = null; // row classes and checkboxes
     this.invalidate();
   }
@@ -1543,35 +1685,95 @@ export class GridEngine {
     this.o.onRowSelectionChange?.(this.getRowSelection());
   }
 
+  #push(step: CheckStep): void {
+    // A newer step for the same id, or a range in the same view covering an older one, replaces it.
+    const sig = 'query' in step ? this.#sigOf(step) : '';
+    this.#checks = this.#checks.filter((old) => {
+      if ('id' in step) return !('id' in old && old.id === step.id);
+      return !('query' in old && this.#sigOf(old) === sig && old.from >= step.from && old.to <= step.to);
+    });
+    this.#checks.push(step);
+  }
+
   /** Check or uncheck a row; with Shift, every row from the last one clicked takes the same state. */
   toggleRow(r: number, range = false): void {
     if (!this.#checksOn() || r < 0 || r >= this.rows.count) return;
-    const on = !this.#isChecked(r);
-    if (range && this.#lastCheck >= 0 && this.#lastCheck < this.rows.count) {
-      const a = Math.min(this.#lastCheck, r);
-      const b = Math.max(this.#lastCheck, r);
-      for (let i = a; i <= b; i++) this.#setChecked(i, on);
-    } else this.#setChecked(r, on);
+    const checked = !this.#isChecked(r);
+    const query = this.query;
+    if (range && this.#lastCheck >= 0 && this.#lastCheck < this.rows.count && this.#lastCheck !== r) {
+      this.#push({ from: Math.min(this.#lastCheck, r), to: Math.max(this.#lastCheck, r), query, checked });
+    } else {
+      const id = this.#rowIdAt(r);
+      // A row checked by id remembers where it was, so it can be counted without asking the server.
+      this.#push(id !== undefined ? { id, checked, at: r, atSig: querySig(query) } : { from: r, to: r, query, checked });
+    }
     this.#lastCheck = r;
     this.#rowSelectionChanged();
   }
 
-  /** The header checkbox: all rows (matching the filter), or none. */
+  /** True when every row of the current view is checked by one step (the header checkbox). */
+  #allChecked(): boolean {
+    const last = this.#checks[this.#checks.length - 1];
+    return this.#checks.length === 1 && !!last && 'query' in last && last.checked && last.from === 0 && last.to >= this.rows.count - 1
+      && this.#sigOf(last) === querySig(this.query);
+  }
+
+  /** The header checkbox: every row of the view (matching the filter), or none. */
   toggleAllRows(): void {
     if (!this.#checksOn()) return;
-    const { all, set } = this.#rowSel;
-    const everything = all && set.size === 0;
-    const some = all || set.size > 0;
-    this.#rowSel = everything || some ? { all: false, set: new Set() } : { all: true, set: new Set() };
+    this.#checks = this.#checks.length ? [] : [{ from: 0, to: Math.max(0, this.rows.count - 1), query: this.query, checked: true }];
+    this.#lastCheck = -1;
     this.#rowSelectionChanged();
+  }
+
+  /**
+   * How many rows are checked, when it can be told without the server: every range is in the current
+   * sort / filter and every row checked by id has a known position. Otherwise undefined.
+   */
+  checkedCount(): number | undefined {
+    // Count in the view where the ranges were made (a sort does not change which rows are checked):
+    // all ranges must share one sort / filter; rows checked by id are placed in it.
+    const ranges = this.#checks.filter((st): st is CheckStep & { query: Query } => 'query' in st);
+    const home = ranges[0]?.query ?? this.query;
+    const sig = querySig(home);
+    if (ranges.some((st) => this.#sigOf(st) !== sig)) return undefined;
+    const count = ranges.length && sig !== querySig(this.query) ? undefined : this.rows.count;
+    let spans: [number, number][] = []; // disjoint, sorted
+    const apply = (a: number, b: number, on: boolean) => {
+      const out: [number, number][] = [];
+      for (const [x, y] of spans) {
+        if (y < a || x > b) out.push([x, y]);
+        else {
+          if (x < a) out.push([x, a - 1]);
+          if (y > b) out.push([b + 1, y]);
+        }
+      }
+      if (on) out.push([a, b]);
+      spans = out.sort((p, q) => p[0] - q[0]);
+    };
+    for (const step of this.#checks) {
+      if ('id' in step) {
+        const pos = step.atSig === sig ? step.at : this.o.findRow ? this.#positionIn(sig, home, step.id) : undefined;
+        if (pos === undefined || pos === null) return undefined;
+        if (pos >= 0) apply(pos, pos, step.checked);
+      } else apply(step.from, count === undefined ? step.to : Math.min(step.to, count - 1), step.checked);
+    }
+    return spans.reduce((n, [a, b]) => n + (b - a + 1), 0);
   }
 
   #paintCornerCheck(): void {
     const box = this.#cornerCheck;
     if (!box) return;
-    const { all, set } = this.#rowSel;
-    box.checked = all && set.size === 0;
-    box.indeterminate = (all && set.size > 0) || (!all && set.size > 0);
+    const all = this.#allChecked();
+    box.checked = all;
+    box.indeterminate = !all && this.#checks.some((st) => st.checked);
+  }
+
+  /** After drawing: say once per view when checked rows could not be placed in it. */
+  #checksNotice(): void {
+    if (!this.#checksUnknown || this.#checksNoticeShown) return;
+    this.#checksNoticeShown = true;
+    this.notify(this.msg.checksNotShown, false);
   }
 
   // ---------------------------------------------------------------- column order
@@ -1579,41 +1781,36 @@ export class GridEngine {
   /** Move the column at visible index `from` to visible index `to` (pinned and other columns stay apart). */
   moveColumn(from: number, to: number): void {
     const { model } = this;
-    if (!model.columnOrder || !model.setColumnOrder) return;
+    if (!model.moveColumn) return;
     const n = this.cols.count;
     const P = this.pinCount;
     if (from < 0 || from >= n) return;
     to = from < P ? clamp(to, 0, P - 1) : clamp(to, P, n - 1);
     if (to === from) return;
-    const visible = Array.from({ length: n }, (_, i) => this.colSource(i));
-    const [moved] = visible.splice(from, 1);
-    visible.splice(to, 0, moved);
-    // Hidden columns keep their slots in the full order; the visible ones take the new sequence.
-    const shown = new Set(visible);
-    let k = 0;
-    const order = model.columnOrder().map((s) => (shown.has(s) ? visible[k++] : s));
     const activeSrc = this.colSource(this.sel.active.c);
-    model.setColumnOrder(order);
-    this.cols = model.cols;
+    model.moveColumn(from, to);
+    this.#columnsMoved(activeSrc);
+    this.o.onColumnOrderChange?.(model.columnOrder?.() ?? []);
+    this.o.onSelectionChange?.(this.selectionInfo());
+  }
+
+  /** Apply a column order from code: compact ([first, last] runs and indexes), source indexes or keys. */
+  setColumnOrder(order: (string | number | [number, number])[]): void {
+    if (!this.model.setColumnOrder) return;
+    const activeSrc = this.colSource(this.sel.active.c);
+    this.model.setColumnOrder(order);
+    this.#columnsMoved(activeSrc);
+  }
+
+  /** After the column order changed: redraw, and keep the active cell on its column. */
+  #columnsMoved(activeSrc: number): void {
+    this.cols = this.model.cols;
     this.#structureChanged();
     const c = this.#visibleCol(activeSrc);
     if (c >= 0) {
       const cell = { r: this.sel.active.r, c };
       this.sel = { active: cell, anchor: cell, focus: cell, ranges: [rangeOf(cell, cell)] };
     } else this.#clampSelection();
-    this.scrollToVirtual(this.vx, this.vy);
-    this.o.onColumnOrderChange?.(model.columnOrder());
-    this.o.onSelectionChange?.(this.selectionInfo());
-  }
-
-  /** Apply a column order (source indexes) from code. */
-  setColumnOrder(order: number[]): void {
-    const { model } = this;
-    if (!model.setColumnOrder) return;
-    model.setColumnOrder(order);
-    this.cols = model.cols;
-    this.#structureChanged();
-    this.#clampSelection();
     this.scrollToVirtual(this.vx, this.vy);
   }
 
@@ -1824,6 +2021,7 @@ export class GridEngine {
   /** Set the selection (visible coordinates); the first range's top-left becomes active unless given. */
   setSelection({ active, ranges }: { active?: CellPosition; ranges?: SelectionRange[] }): void {
     this.#followSeq++;
+    this.#userSelected = true;
     const list = (ranges ?? []).map((g) => this.#clampRange(g));
     const a = this.#clampCell(active ?? (list[0] ? { r: list[0].r0, c: list[0].c0 } : { r: 0, c: 0 }));
     this.sel = { active: a, anchor: a, focus: a, ranges: list.length ? list : [rangeOf(a, a)] };
@@ -1832,6 +2030,7 @@ export class GridEngine {
 
   selectAll(): void {
     if (this.o.selection !== 'multi') return;
+    this.#userSelected = true;
     const last = { r: this.rows.count - 1, c: this.cols.count - 1 };
     this.sel = { active: this.sel.active, anchor: { r: 0, c: 0 }, focus: last, ranges: [{ r0: 0, c0: 0, r1: last.r, c1: last.c }] };
     this.#selectionChanged();
@@ -1841,7 +2040,9 @@ export class GridEngine {
   selectionInfo(): SelectionInfo {
     const { active, ranges } = this.sel;
     const g = ranges[ranges.length - 1];
-    return { active: { ...active }, text: this.cellText(active.r, active.c), ranges: ranges.length, rows: g.r1 - g.r0 + 1, cols: g.c1 - g.c0 + 1, cells: cellCount(ranges) };
+    const info: SelectionInfo = { active: { ...active }, text: this.cellText(active.r, active.c), ranges: ranges.length, rows: g.r1 - g.r0 + 1, cols: g.c1 - g.c0 + 1, cells: cellCount(ranges) };
+    if (this.#moveReason) info.moved = this.#moveReason;
+    return info;
   }
 
   /** Text shown in a visible cell (a merged cell shows its own value), or undefined if not loaded. */
@@ -1890,6 +2091,7 @@ export class GridEngine {
   /** mode: 'set' (new selection), 'add' (extra range), 'extend' (move the focus corner of the last range). */
   #select(cell: CellPosition, mode: SelectMode): void {
     this.#followSeq++; // the user moved on: a pending "follow the row" must not move the selection back
+    this.#userSelected = true;
     if (this.o.selection !== 'multi') mode = 'set';
     const target = this.#clampCell(cell);
     if (mode === 'extend') {
@@ -1913,6 +2115,7 @@ export class GridEngine {
     this.#noteActiveRow();
     this.#render(true);
     this.o.onSelectionChange?.(this.selectionInfo());
+    this.#moveReason = undefined;
   }
 
   /** Scroll the least amount needed to show a cell (just that cell, even inside a large merged cell). */
@@ -2009,6 +2212,7 @@ export class GridEngine {
 
   /** Whole rows (axis 'rows') or columns a..b. */
   #selectLines(axis: AxisName, a: number, b: number, mode: SelectMode): void {
+    this.#userSelected = true;
     const last = { r: this.rows.count - 1, c: this.cols.count - 1 };
     const win = this.#win ?? { firstRow: 0, firstCol: 0 };
     if (mode === 'extend') {
@@ -2137,7 +2341,7 @@ export class GridEngine {
     }
 
     // Merged cells belong to the unsorted layout (see #render).
-    const merges = this.sortParam || this.filterParam ? null : this.merges;
+    const merges = this.sortParam || this.filterParam || this.#serverColFilter ? null : this.merges;
     const { model } = this;
     const plans = ranges.map((g) => planCopy(g, {
       rowSource: this.rowSource,
@@ -2405,6 +2609,7 @@ export class GridEngine {
     this.#win = { r0, r1, c0, c1, firstRow, lastRow, firstCol, lastCol };
     this.#labelNeeds = needs;
     this.#scheduleFetch(firstRow, firstCol);
+    if (this.#checks.length) this.#checksNotice();
 
     const ms = performance.now() - t0;
     const s = this.stats;
@@ -2455,7 +2660,7 @@ export class GridEngine {
   #renderMerges(r0: number, c0: number, ox: number, oy: number, valueAt: (rs: number, cs: number) => unknown): void {
     const cover = this.#cover;
     // Merged cells belong to the unsorted layout; while sorted they would join unrelated rows, so they are hidden.
-    const transformed = this.sortParam || this.filterParam;
+    const transformed = this.sortParam || this.filterParam || this.#serverColFilter; // also columns renumbered by the server
     if (transformed) cover.fill(0);
     const pieces = transformed ? [] : mergePieces(this.merges, r0, this.#rowSrc, this.#rowExact, c0, this.#colSrc, this.#colExact, cover);
     const anchors = new Set<string>();
@@ -2810,9 +3015,17 @@ export class GridEngine {
       const item = {
         key,
         dist: -1,
-        load: (signal: AbortSignal) => fetchLabels({
-          axis, level, from, n: LABEL_BLOCK, signal, query: shared ? labelQuery : query, sort: shared ? '' : sort, filter: shared ? '' : filter, colfilter,
-        }).then((names): LabelBlock => ({ from, names })),
+        load: (signal: AbortSignal) => (shared && level === 0 && this.model.describedColumns && this.o.fetchColumns
+          // Described columns: one request brings titles and descriptions.
+          ? this.o.fetchColumns({ from, n: Math.min(LABEL_BLOCK, Math.max(0, colCount - from)), signal, query: labelQuery, sort: '', filter: '', colfilter })
+            .then((metas): LabelBlock => {
+              const list = Array.isArray(metas) ? metas.map((m) => m ?? {}) : [];
+              this.#columnsDescribed(from, list);
+              return { from, names: list.map((m) => (m.title === undefined ? '' : String(m.title))), metas: list } as LabelBlock;
+            })
+          : fetchLabels({
+            axis, level, from, n: LABEL_BLOCK, signal, query: shared ? labelQuery : query, sort: shared ? '' : sort, filter: shared ? '' : filter, colfilter,
+          }).then((names): LabelBlock => ({ from, names }))),
       };
       (shared ? colLabelList : list).push(item);
     }

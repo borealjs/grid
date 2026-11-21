@@ -6,9 +6,13 @@
 //   GET  {baseUrl}/labels?axis&level&from&n&…                 -> { names }
 //   GET  {baseUrl}/values?axis&level&q&limit                  -> { total, matches, values }
 //   GET  {baseUrl}/progress?sort&filter&colfilter (optional)  -> { active, phase, done, total } while /meta works
+//   GET  {baseUrl}/find?ids&sort&filter (optional)            -> { positions } (row ids -> positions, -1 = not in view)
+//   GET  {baseUrl}/columns?from&n&colfilter (optional)       -> { columns: ColumnDescription[] } (meta says columns: true)
+//   GET  {baseUrl}/values?axis=cols&level=0&q&limit           -> column groups, for the column chooser of described tables
+//   block / gather responses may carry rowIds (per rect for gather): the id of each row, for /find.
 
 import { columnFilterFromPublic, filterFromPublic } from '../query.js';
-import type { ColumnFilterItem, DataSource, FilterItem, Layout, Merge, Query, SortItem } from '../types.js';
+import type { ColumnDescription, ColumnFilterItem, DataSource, FilterItem, Layout, Merge, Query, RowId, SortItem } from '../types.js';
 
 export interface HttpSourceOptions {
   /** Default '/api'. */
@@ -33,6 +37,10 @@ interface Meta {
 
 const PROGRESS_FIRST_MS = 300;
 const PROGRESS_EVERY_MS = 500;
+/** Row ids remembered per sort + filter (positions on or near the screen). */
+const MAX_IDS_PER_VIEW = 50_000;
+const MAX_ID_VIEWS = 6;
+const FIND_BATCH = 500;
 
 const sortParam = (sort: readonly SortItem[]) =>
   sort.map((s) => {
@@ -53,6 +61,46 @@ const columnFilterParam = (list: readonly ColumnFilterItem[]) =>
 export function createHttpSource({ baseUrl = '/api', params = {}, fetch: fetchImpl = globalThis.fetch.bind(globalThis), headers = {} }: HttpSourceOptions = {}): DataSource<string> {
   const base = baseUrl.replace(/\/$/, '');
   let progressSupported = true;
+  let findSupported = true;
+  // Row ids the server sent with the cells: "sort|filter" -> position -> id (LRU, bounded).
+  const ids = new Map<string, Map<number, RowId>>();
+  const sigOf = (q: Query) => `${sortParam(q.sort)}|${filterParam(q.filter)}`;
+  const rememberIds = (query: Query, r0: number, list: unknown) => {
+    if (!Array.isArray(list)) return;
+    const sig = sigOf(query);
+    let m = ids.get(sig);
+    if (m) ids.delete(sig);
+    else m = new Map();
+    ids.set(sig, m);
+    while (ids.size > MAX_ID_VIEWS) ids.delete(ids.keys().next().value as string);
+    for (let i = 0; i < list.length; i++) {
+      m.delete(r0 + i);
+      m.set(r0 + i, list[i] as RowId);
+    }
+    while (m.size > MAX_IDS_PER_VIEW) m.delete(m.keys().next().value as number);
+  };
+  // Lookups asked for in the same tick go out as one /find request per sort + filter.
+  const finds = new Map<string, { query: Query; waiting: Map<RowId, ((p: number | null) => void)[]> }>();
+  const flushFinds = async (sig: string) => {
+    const batch = finds.get(sig);
+    finds.delete(sig);
+    if (!batch) return;
+    const list = [...batch.waiting.keys()];
+    for (let i = 0; i < list.length; i += FIND_BATCH) {
+      const part = list.slice(i, i + FIND_BATCH);
+      let positions: (number | null)[] = part.map(() => null);
+      if (findSupported) {
+        try {
+          const res = await fetchImpl(url('find', { ids: part.join(',') }, batch.query), { headers });
+          if (res.status === 404) findSupported = false;
+          else if (res.ok) positions = ((await res.json()) as { positions: number[] }).positions;
+        } catch {
+          // cannot tell
+        }
+      }
+      part.forEach((id, k) => { for (const done of batch.waiting.get(id) ?? []) done(typeof positions[k] === 'number' ? positions[k] : null); });
+    }
+  };
   const url = (path: string, query: Record<string, string | number>, view?: Partial<Query>) => {
     const qs = new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]));
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) qs.set(k, String(v));
@@ -114,6 +162,7 @@ export function createHttpSource({ baseUrl = '/api', params = {}, fetch: fetchIm
         rowCount: meta.rows,
         totalRowCount: meta.totalRows ?? meta.rows,
         columnCount: meta.cols,
+        describedColumns: meta.columns === true, // the server describes columns on demand (/columns)
         maxSortRows: meta.sort?.multiMaxRows,
         maxFilterRows: meta.filter?.maxRows,
         meta,
@@ -122,16 +171,44 @@ export function createHttpSource({ baseUrl = '/api', params = {}, fetch: fetchIm
     async getCells({ rects, query, signal }) {
       if (rects.length === 1) {
         const { row, col, rowCount, colCount } = rects[0];
-        const res = await getJson<{ cells: string[]; merges?: Merge[] }>(url('block', { r0: row, c0: col, nr: rowCount, nc: colCount }, query), { signal });
+        const res = await getJson<{ cells: string[]; merges?: Merge[]; rowIds?: RowId[] }>(url('block', { r0: row, c0: col, nr: rowCount, nc: colCount }, query), { signal });
+        rememberIds(query, row, res.rowIds);
         return { cells: [res.cells], merges: res.merges };
       }
-      const res = await getJson<{ cells: string[][]; merges?: Merge[] }>(url('gather', {}, query), {
+      const res = await getJson<{ cells: string[][]; merges?: Merge[]; rowIds?: RowId[][] }>(url('gather', {}, query), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rects: rects.map((r) => [r.row, r.col, r.rowCount, r.colCount]) }),
         signal,
       });
+      res.rowIds?.forEach((list, i) => rememberIds(query, rects[i].row, list));
       return { cells: res.cells, merges: res.merges };
+    },
+    async getColumns({ start, count, query, signal }) {
+      const res = await getJson<{ columns: ColumnDescription[] }>(url('columns', { from: start, n: count }, { columnFilter: query.columnFilter }), { signal });
+      return res.columns;
+    },
+    rowIdAt(position, query) {
+      return ids.get(sigOf(query))?.get(position);
+    },
+    indexOfRow(id, query) {
+      if (!findSupported) return null;
+      const sig = sigOf(query);
+      let batch = finds.get(sig);
+      if (!batch) {
+        batch = { query, waiting: new Map() };
+        finds.set(sig, batch);
+        queueMicrotask(() => void flushFinds(sig));
+      }
+      const waiting = batch.waiting;
+      return new Promise<number | null>((resolve) => {
+        const list = waiting.get(id) ?? [];
+        list.push(resolve);
+        waiting.set(id, list);
+      });
+    },
+    clearCache() {
+      ids.clear();
     },
     async getLabels({ axis, level, start, count, query, signal }) {
       const res = await getJson<{ names: string[] }>(url('labels', { axis, level, from: start, n: count }, query), { signal });

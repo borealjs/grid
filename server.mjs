@@ -1,11 +1,16 @@
 // Zero-dependency server for the grid demos: the /api protocol (see demo-backend.mjs for the
 // endpoints and data) plus static files for examples/ and packages/. `npm start`, port 5174.
+// BACKEND=sql serves a DuckDB database instead (sql-backend.mjs; file from DB, default data/grid.duckdb).
 
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { handleApiRequest } from './demo-backend.mjs';
+
+const BACKEND = process.env.BACKEND === 'sql' ? `duckdb (${process.env.DB ?? 'data/grid.duckdb'})` : 'demo (procedural data)';
+const { handleApiRequest } = process.env.BACKEND === 'sql'
+  ? await (await import('./sql-backend.mjs')).openSqlBackend(process.env.DB ?? 'data/grid.duckdb')
+  : await import('./demo-backend.mjs');
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url)).replace(/[\\/]$/, '');
 
@@ -21,6 +26,7 @@ function sendJson(res, status, body) {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(json),
     'Cache-Control': 'no-store',
+    'X-Backend': BACKEND,
   });
   res.end(json);
 }
@@ -50,7 +56,7 @@ async function handleApi(url, req, res) {
   if (out) sendJson(res, out.status, out.body);
 }
 
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 
 async function serveStatic(pathname, res) {
   if (pathname === '/' || pathname === '/index.html') {
@@ -61,7 +67,8 @@ async function serveStatic(pathname, res) {
   let rel = normalize(decodeURIComponent(pathname));
   if (rel.endsWith(sep) || rel.endsWith('/')) rel += 'index.html';
   const file = join(ROOT, rel);
-  const allowed = STATIC_DIRS.some((d) => file.startsWith(join(ROOT, d) + sep));
+  // demo-backend.mjs too: the playground runs it in a worker for its billion-row virtual data.
+  const allowed = STATIC_DIRS.some((d) => file.startsWith(join(ROOT, d) + sep)) || file === join(ROOT, 'demo-backend.mjs');
   if (!allowed || file.includes(`${sep}node_modules${sep}`)) return sendJson(res, 403, { error: 'forbidden' });
   try {
     const body = await readFile(file);
@@ -88,5 +95,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Virtual grid demo on http://localhost:${PORT}`);
+  console.log(`Virtual grid demo on http://localhost:${PORT} · backend: ${BACKEND}`);
 });

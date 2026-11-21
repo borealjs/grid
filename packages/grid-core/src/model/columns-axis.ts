@@ -1,4 +1,5 @@
 import type { Axis } from '../axes/axis.js';
+import { RunOrder } from './column-order.js';
 
 /**
  * The visible columns of a table: all source columns, or a sorted subset (hidden columns, column
@@ -15,11 +16,11 @@ export class ColumnsAxis implements Axis {
   constructor(
     readonly sourceCount: number,
     widthOf: ((src: number) => number) | null,
-    /** Source indexes of the visible columns, in display order; null = every column. */
-    readonly visible: Int32Array | null,
+    /** Source indexes of the visible columns in display order (a list, or runs for very wide tables); null = every column in order. */
+    readonly visible: Int32Array | RunOrder | null,
   ) {
-    this.count = visible ? visible.length : sourceCount;
-    if (visible) {
+    this.count = visible instanceof RunOrder ? visible.count : visible ? visible.length : sourceCount;
+    if (visible && !(visible instanceof RunOrder)) {
       for (let i = 1; i < visible.length; i++) {
         if (visible[i] <= visible[i - 1]) {
           // Reordered: binary search no longer works, keep a source -> visible map.
@@ -43,7 +44,7 @@ export class ColumnsAxis implements Axis {
     }
   }
 
-  static uniform(sourceCount: number, width: number, visible: Int32Array | null): ColumnsAxis {
+  static uniform(sourceCount: number, width: number, visible: Int32Array | RunOrder | null): ColumnsAxis {
     const axis = new ColumnsAxis(sourceCount, null, visible);
     axis.width = width;
     axis.total = axis.count * width;
@@ -53,9 +54,13 @@ export class ColumnsAxis implements Axis {
 
   #reverse: Int32Array | null = null;
 
-  sourceOf(i: number): number { return this.visible ? this.visible[i] : i; }
+  sourceOf(i: number): number {
+    const v = this.visible;
+    return v instanceof RunOrder ? v.sourceOf(i) : v ? v[i] : i;
+  }
 
   fromSource(src: number): number {
+    if (this.visible instanceof RunOrder) return this.visible.fromSource(src);
     if (!this.visible) return src >= 0 && src < this.sourceCount ? src : -1;
     if (this.#reverse) return src >= 0 && src < this.sourceCount ? this.#reverse[src] : -1;
     let lo = 0;

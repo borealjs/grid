@@ -101,21 +101,32 @@ const rest = createGrid(document.body, {
   getRowId: (row) => row.id,
   rowSelection: true,
   columnOrder: ['n', 'id'],
-  onRowSelectionChange: (sel) => console.log(sel.all ? sel.except : sel.ids),
+  onRowSelectionChange: (sel) => console.log(sel.checks.map((c) => ('id' in c ? c.id : `${c.from}-${c.to}`))),
   onColumnOrderChange: (order) => console.log(order.join()),
   onCellClick: ({ row, key, event }) => console.log(row, key, event.type),
   onCellContextMenu: (e) => e.event.preventDefault(),
 });
-rest.setRowSelection({ all: true, except: [1] });
+rest.setRowSelection({ checks: [{ from: 0, to: 49_999_999, query: rest.getQuery(), checked: true }, { id: 7, checked: false }] });
+const howMany: number | undefined = rest.checkedCount();
+console.log(howMany);
+// Very wide tables: pin leading columns and keep the order compact.
+createGrid(document.body, { dataSource: ds, columnCount: 1_000_000, getColumn: (i) => ({ title: `C${i}` }), pinnedColumns: 2, columnOrder: [[0, 4], 9, [5, 8]] });
 const checkedRows: RowSelection = rest.getRowSelection();
 console.log(checkedRows, rest.getRow(0), rest.getColumnOrder());
 rest.setColumnOrder(['id', 'n']);
 // @ts-expect-error: a data source needs rows or cells to be useful, but getRows must return { rows, total }
 createGrid(document.body, { dataSource: { getRows: async () => [] } });
+// Columns described on demand by the data source (a million distinct columns).
+const describedSource: DataSource = {
+  getCells: () => [],
+  getLayout: () => ({ rowCount: 10, columnCount: 1_000_000 }),
+  getColumns: ({ start, count }) => Array.from({ length: count }, (_, i) => ({ title: `C${start + i}`, type: 'number' as const, width: 90, filter: 'number' as const, group: 'Numbers' })),
+};
+createGrid(document.body, { dataSource: describedSource, columnChooser: true, getColumn: () => ({ format: (v) => String(v) }) });
 const explicit = createRowSource<{ id: number }>({ getRows: async () => ({ rows: [{ id: 1 }], total: 1 }), columns: ['id'], pageSize: 50 });
 createGrid(document.body, { dataSource: explicit });
 export function Orders() {
-  const [checked, setChecked] = useState<RowSelection>({ all: false, ids: [] });
+  const [checked, setChecked] = useState<RowSelection>({ checks: [] });
   const source = useDataSource({ getRows: async ({ offset }) => ({ rows: [{ id: offset, name: 'A', status: 'Active' as const, amount: 1 }], total: 1 }) });
   const open = (e: CellEvent<Customer>) => console.log(e.row?.name, e.key);
   return (

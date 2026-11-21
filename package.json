@@ -11,6 +11,9 @@
     "prepare": "npm run build",
     "prestart": "npm run build",
     "start": "node server.mjs",
+    "prestart:sql": "npm run build",
+    "start:sql": "BACKEND=sql node server.mjs",
+    "seed:sql": "node scripts/seed-duckdb.mjs",
     "pretest": "npm run build",
     "test": "node --import tsx --test test/*.test.mjs",
     "dev:react": "npm run dev --workspace examples/react",
@@ -22,6 +25,7 @@
     "preview:demo": "npm run build:demo && npm run preview:pages --workspace examples/react"
   },
   "devDependencies": {
+    "@duckdb/node-api": "1.5.6-r.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "tsdown": "^0.23.7",

@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TreeAxis, UniformAxis, ResizableAxis, createTableModel, EMPTY_QUERY } from '../packages/grid-core/src/index.ts';
+import { RunOrder } from '../packages/grid-core/src/model/column-order.ts';
 import { MergeIndex, mergePieces, normalizeMerge } from '../packages/grid-core/src/engine/merges.ts';
 import { cellRange, rangeOf, isActiveOnly, inRanges, cellCount } from '../packages/grid-core/src/engine/selection.ts';
 import { buildCopy, coalesceRects, batchRects, planCopy, tsvField } from '../packages/grid-core/src/engine/clipboard.ts';
@@ -172,7 +173,7 @@ test('table model: column order, pinned columns first, row checkbox band', () =>
   assert.equal(model.cols.sizeOf(1), 50);
   model.setColumnOrder([0, 3, 2, 1, 4]);
   assert.deepEqual(Array.from({ length: model.cols.count }, (_, i) => model.colSource(i)), [1, 4, 0, 3]);
-  assert.equal(model.rowBands[0].width, 88);
+  assert.equal(model.rowBands[0].width, 100);
   const noNumbers = createTableModel({ columns, rowHeader: false, rowSelection: true }, { rowCount: 3 }, source);
   assert.equal(noNumbers.rowBands[0].width, 40);
   assert.equal(createTableModel({ columns, rowHeader: false }, { rowCount: 3 }, source).rowBands.length, 0);
@@ -191,4 +192,64 @@ test('table model: row sources load the first page of a new sort with progress',
   await model.applyView({ sort: '0:a', filter: '', colfilter: '', query: { sort: [{ column: 0, direction: 'asc' }], filter: [], columnFilter: [] } });
   assert.deepEqual(calls, [1]);
   assert.equal(progress.length, 1);
+});
+
+test('run order: moves, lookups and the compact form stay small at a trillion columns', () => {
+  const n = 1e12;
+  const order = new RunOrder(n);
+  assert.ok(order.identity);
+  order.move(9, 5); // column 9 now sits at position 5
+  order.move(n - 1, 0); // the last column first
+  assert.deepEqual(order.toCompact(), [n - 1, [0, 4], 9, [5, 8], [10, n - 2]]);
+  assert.equal(order.sourceOf(0), n - 1);
+  assert.equal(order.sourceOf(6), 9);
+  assert.equal(order.sourceOf(7), 5);
+  assert.equal(order.fromSource(9), 6);
+  assert.equal(order.fromSource(n - 2), n - 1);
+  const back = RunOrder.fromCompact(n, order.toCompact());
+  assert.deepEqual(back.toCompact(), order.toCompact());
+  // Overlaps are dropped, missing columns appended in order.
+  assert.deepEqual(RunOrder.fromCompact(10, [[2, 4], 3, 8]).toCompact(), [[2, 4], 8, [0, 1], [5, 7], 9]);
+  assert.deepEqual(RunOrder.fromList(5, [3, 4, 0]).toCompact(), [[3, 4], [0, 2]]);
+});
+
+test('table model: very wide tables pin leading columns and reorder without a full order', () => {
+  const source = { getCells: () => [], getLayout: () => ({ rowCount: 3 }) };
+  const model = createTableModel({ columnCount: 1_000_000, getColumn: (i) => ({ title: `C${i}` }), pinnedColumns: 2, columnOrder: [[0, 4], 9, [5, 8]] }, { rowCount: 3 }, source);
+  assert.equal(model.cols.count, 1_000_000);
+  assert.equal(model.pinnedCols(), 2);
+  assert.equal(model.colSource(5), 9);
+  model.moveColumn(999_999, 3);
+  assert.equal(model.colSource(3), 999_999);
+  assert.deepEqual(model.columnOrder(), [[0, 2], 999_999, [3, 4], 9, [5, 8], [10, 999_998]]);
+  assert.ok(model.columnOrder().length < 10);
+});
+
+test('table model: columns described on demand, merged under code, renumbered by a server column filter', async () => {
+  const described = new Map([[5, { title: 'Amount 5', type: 'number', width: 90, filter: 'number' }]]);
+  let columnCount = 1_000_000;
+  const source = { getCells: () => [], getColumns: () => [], getLayout: () => ({ rowCount: 10, columnCount }), getFilterValues: () => ({ values: ['A', 'B'] }) };
+  const model = createTableModel({ getColumn: (i) => (i === 5 ? { format: (v) => '$' + v } : undefined), columnChooser: true }, { rowCount: 10, columnCount }, source);
+  assert.equal(model.describedColumns, true);
+  assert.equal(model.serverColFilter, true);
+  model.describe = (src) => described.get(src);
+  // Not described yet: plain, and asking for the label is what loads the description.
+  const asked = [];
+  const label = (axis, level, idx) => { asked.push(idx); return undefined; };
+  assert.equal(model.colSegments(4, 4, label)[0].label, undefined);
+  assert.deepEqual(asked, [4]);
+  assert.equal(model.columnInfo(4).cls, '');
+  // Described: the server's type and title, code's format on top.
+  const info = model.columnInfo(5);
+  assert.equal(info.cls, ' vg-end');
+  assert.equal(info.format(3), '$3');
+  assert.equal(model.colSegments(5, 5, () => 'ignored')[0].label, 'Amount 5');
+  assert.deepEqual(model.filterOptions({ col: 5 }, label), { kind: 'number', name: 'Amount 5' });
+  // The column chooser asks the data source for groups instead of scanning a million columns.
+  const chooser = model.filterOptions({ cdim: 0 }, label);
+  assert.deepEqual(await chooser.search('', new AbortController().signal), { values: ['A', 'B'] });
+  // A column filter: the server renumbers the columns; the count comes from its layout.
+  columnCount = 250_000;
+  await model.applyView({ sort: '', filter: '', colfilter: '[{"dim":0,"op":"in","v":["A"]}]', query: { sort: [], filter: [], columnFilter: [{ level: 0, op: 'in', values: ['A'] }] } });
+  assert.equal(model.cols.count, 250_000);
 });

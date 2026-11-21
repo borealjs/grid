@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BorealJS Grid · Playground</title>
+  <meta name="description" content="Load your CSV or generate data, lay out rows, columns and measures, simulate server latency and watch performance live.">
+  <link rel="stylesheet" href="../../packages/grid-core/src/grid.css">
+  <link rel="stylesheet" href="playground.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect x="2" y="3" width="20" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2 9h20M9 9v12M15 9v12" stroke="currentColor" stroke-width="1.8"/></svg>
+      <strong>BorealJS Grid</strong><span class="muted">Playground</span>
+    </div>
+    <div class="dataset-badge" id="datasetBadge" aria-live="polite">No data yet</div>
+    <div class="topbar-actions">
+      <button type="button" class="btn ghost" id="shareBtn" title="Copy a link with this configuration">Share link</button>
+      <button type="button" class="btn ghost" id="codeBtn" title="The code for this exact setup">&lt;/&gt; Code</button>
+      <div class="seg" role="radiogroup" aria-label="Theme" id="themeSeg">
+        <button type="button" role="radio" data-v="auto" title="Follow the system">Auto</button>
+        <button type="button" role="radio" data-v="light">Light</button>
+        <button type="button" role="radio" data-v="dark">Dark</button>
+      </div>
+      <button type="button" class="btn ghost icon" id="togglePerf" title="Show or hide the performance panel" aria-pressed="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 20h18M6 16v-5M11 16V6M16 16v-8M21 16v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="layout" id="layout">
+    <!-- ============================================================ configuration -->
+    <aside class="panel left" aria-label="Configuration">
+      <details class="section" open>
+        <summary>1 · Data</summary>
+        <div class="tabs" role="tablist" id="sourceTabs">
+          <button type="button" role="tab" data-tab="generate" aria-selected="true">Generate</button>
+          <button type="button" role="tab" data-tab="csv" aria-selected="false">Upload CSV</button>
+          <button type="button" role="tab" data-tab="virtual" aria-selected="false" title="Billions of rows, computed per cell">Virtual 1B+</button>
+        </div>
+        <form id="genForm" class="tabpanel" data-panel="generate">
+          <label class="field">Rows
+            <input name="rows" inputmode="numeric" autocomplete="off">
+          </label>
+          <div class="chips-row" id="rowPresets">
+            <button type="button" data-rows="1000">1K</button>
+            <button type="button" data-rows="100000">100K</button>
+            <button type="button" data-rows="1000000">1M</button>
+            <button type="button" data-rows="3000000">3M</button>
+          </div>
+          <div class="grid2">
+            <label class="field">Dimension columns
+              <input name="dims" type="number" min="1" max="40">
+            </label>
+            <label class="field">Measure columns
+              <input name="measures" type="number" min="1" max="40">
+            </label>
+            <label class="field">Years
+              <input name="years" type="number" min="1" max="30">
+            </label>
+            <label class="field">Seed
+              <input name="seed" type="number" min="1">
+            </label>
+          </div>
+          <p class="hint">Region › Country › City, Category › Product, Year › Quarter › Month and more, with seasonality, so pivots show real patterns. Extra columns become <i>Attr N</i> and <i>Metric N</i>.</p>
+          <button type="submit" class="btn primary block">Generate data</button>
+        </form>
+        <div class="tabpanel" data-panel="csv" hidden>
+          <label class="dropzone" id="dropzone">
+            <input type="file" id="csvFile" accept=".csv,.tsv,.txt,text/csv">
+            <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span><b>Drop a CSV here</b> or click to choose</span>
+            <small class="muted">Parsed on a worker, never uploaded anywhere</small>
+          </label>
+          <div class="grid2">
+            <label class="field">Delimiter
+              <select id="csvDelimiter">
+                <option value="auto">Detect</option>
+                <option value=",">Comma ,</option>
+                <option value=";">Semicolon ;</option>
+                <option value="tab">Tab</option>
+                <option value="|">Pipe |</option>
+              </select>
+            </label>
+            <label class="check inline"><input type="checkbox" id="csvHeader" checked> First row is the header</label>
+          </div>
+          <button type="button" class="btn block" id="sampleCsv">Try a sample CSV (25,000 rows)</button>
+        </div>
+        <form id="virtualForm" class="tabpanel" data-panel="virtual" hidden>
+          <label class="field">Rows
+            <input name="rows" inputmode="numeric" autocomplete="off">
+          </label>
+          <div class="chips-row" id="virtualRowPresets">
+            <button type="button" data-rows="1000000">1M</button>
+            <button type="button" data-rows="1000000000">1B</button>
+            <button type="button" data-rows="1000000000000">1T</button>
+          </div>
+          <div class="grid2">
+            <label class="field" title="Table view">Columns
+              <input name="cols" inputmode="numeric" autocomplete="off">
+            </label>
+            <label class="field" title="Pivot view: each year adds 68 columns">Years (pivot)
+              <input name="years" type="number" min="1" max="20000">
+            </label>
+          </div>
+          <p class="hint">Nothing is stored: the server computes each cell from its row and column number, so size costs no memory. The pivot has a fixed layout and its totals add up exactly. To arrange your own fields, use Generate or Upload CSV.</p>
+          <button type="submit" class="btn primary block">Load virtual data</button>
+        </form>
+        <div class="progress" id="progress" hidden>
+          <div class="progress-text"><span id="progressPhase">Working…</span><span id="progressPct"></span></div>
+          <div class="progress-bar"><i id="progressBar"></i></div>
+        </div>
+      </details>
+
+      <details class="section" open>
+        <summary>2 · Layout</summary>
+        <div class="seg block" role="radiogroup" aria-label="View" id="modeSeg">
+          <button type="button" role="radio" data-v="pivot">Pivot</button>
+          <button type="button" role="radio" data-v="table">Table (raw rows)</button>
+        </div>
+
+        <p class="hint virtual-note" id="virtualNote" hidden></p>
+        <div id="pivotConfig">
+          <div id="pivotFieldsUi">
+          <div class="field-list">
+            <div class="field-list-head">
+              <span>Fields</span>
+              <input type="search" id="fieldSearch" placeholder="Search fields" aria-label="Search fields">
+            </div>
+            <ul id="fieldList" class="fields" aria-label="Available fields"></ul>
+          </div>
+          <p class="hint">Drag fields into a zone, or use the <b>R</b> <b>C</b> <b>V</b> buttons. <b>Σ Values</b> is where the measures go: move it between Rows and Columns, or to another level.</p>
+          <div class="zones">
+            <div class="zone" data-zone="rows"><div class="zone-head">Rows</div><ul class="zone-list" aria-label="Row fields"></ul></div>
+            <div class="zone" data-zone="cols"><div class="zone-head">Columns</div><ul class="zone-list" aria-label="Column fields"></ul></div>
+            <div class="zone wide" data-zone="values"><div class="zone-head">Values (measures)</div><ul class="zone-list" aria-label="Measures"></ul></div>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="btn small" id="swapAxes" title="Swap rows and columns">⇄ Swap</button>
+            <button type="button" class="btn small" id="clearLayout">Clear</button>
+            <select id="presetSelect" class="small" aria-label="Layout presets">
+              <option value="">Presets…</option>
+            </select>
+          </div>
+          <div class="checks">
+            <label class="check"><input type="checkbox" id="optSubtotals"> Subtotals</label>
+            <label class="check"><input type="checkbox" id="optGrand"> Grand totals</label>
+          </div>
+          </div>
+        </div>
+
+        <div id="tableConfig" hidden>
+          <div id="tableFieldsUi">
+          <div class="field-list">
+            <div class="field-list-head">
+              <span>Columns</span>
+              <span class="link-row"><button type="button" class="link" id="colsAll">All</button> · <button type="button" class="link" id="colsNone">None</button></span>
+            </div>
+            <ul id="columnList" class="fields" aria-label="Visible columns"></ul>
+          </div>
+          <label class="field">Pinned columns
+            <input type="number" id="pinnedCount" min="0" max="10">
+          </label>
+          </div>
+        </div>
+      </details>
+
+      <details class="section" open>
+        <summary>3 · Server simulation</summary>
+        <label class="field">Latency per request
+          <span class="slider-row">
+            <input type="range" id="latencyRange" min="0" max="2000" step="10" aria-label="Latency slider">
+            <span class="num-unit"><input id="latency" type="number" min="0" max="60000" aria-label="Latency in milliseconds"><span>ms</span></span>
+          </span>
+        </label>
+        <div class="chips-row" id="latencyPresets">
+          <button type="button" data-ms="0">Local 0</button>
+          <button type="button" data-ms="20">LAN 20</button>
+          <button type="button" data-ms="80">Cloud 80</button>
+          <button type="button" data-ms="300">3G 300</button>
+          <button type="button" data-ms="1200">Slow 1200</button>
+        </div>
+        <div class="grid2">
+          <label class="field">Jitter ±
+            <span class="num-unit"><input id="jitter" type="number" min="0" max="10000"><span>ms</span></span>
+          </label>
+          <label class="field">Failure rate
+            <span class="num-unit"><input id="failRate" type="number" min="0" max="100"><span>%</span></span>
+          </label>
+          <label class="field" title="Rows per getRows request (table view)">Page size
+            <input id="pageSize" type="number" min="10" max="5000">
+          </label>
+          <label class="field" title="Most cells per getCells request (pivot view)">Cells / request
+            <input id="maxCells" type="number" min="500" max="200000" step="500">
+          </label>
+        </div>
+        <p class="hint">Every call the grid makes waits for this latency, then the worker "server" computes the answer. Scroll fast to see requests cancelled as they go off screen.</p>
+      </details>
+
+      <details class="section">
+        <summary>4 · Grid options</summary>
+        <div class="grid2">
+          <label class="field">Row height
+            <input id="optRowHeight" type="number" min="18" max="80">
+          </label>
+          <label class="field">Header height
+            <input id="optHeaderHeight" type="number" min="22" max="80">
+          </label>
+          <label class="field">Column width
+            <input id="optColumnWidth" type="number" min="48" max="400">
+          </label>
+          <label class="field">Selection
+            <select id="optSelection">
+              <option value="multi">Multi range</option>
+              <option value="single">Single cell</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+        </div>
+        <div class="checks cols2">
+          <label class="check"><input type="checkbox" id="optSortable"> Sorting</label>
+          <label class="check"><input type="checkbox" id="optMultiSort"> Multi-sort</label>
+          <label class="check"><input type="checkbox" id="optFilterable"> Filters</label>
+          <label class="check"><input type="checkbox" id="optResizable"> Resize columns</label>
+          <label class="check"><input type="checkbox" id="optReorderable"> Drag columns</label>
+          <label class="check"><input type="checkbox" id="optExpandable"> Expand / collapse</label>
+          <label class="check"><input type="checkbox" id="optCopy"> Copy (⌘C)</label>
+          <label class="check"><input type="checkbox" id="optKeyboard"> Keyboard</label>
+          <label class="check"><input type="checkbox" id="optNotices"> Notices</label>
+          <label class="check"><input type="checkbox" id="optRowSelection"> Row checkboxes</label>
+          <label class="check"><input type="checkbox" id="optRowNumbers"> Row numbers</label>
+          <label class="check"><input type="checkbox" id="optZebra"> Zebra rows</label>
+        </div>
+      </details>
+
+      <details class="section">
+        <summary>5 · Formatting</summary>
+        <div class="grid2">
+          <label class="field">Numbers
+            <select id="fmtStyle">
+              <option value="number">1,234.56</option>
+              <option value="compact">1.2K</option>
+              <option value="currency">$1,234.56</option>
+              <option value="plain">1234.56</option>
+            </select>
+          </label>
+          <label class="field">Decimals
+            <select id="fmtDecimals">
+              <option value="auto">Auto</option>
+              <option value="0">0</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+            </select>
+          </label>
+          <label class="field wide">Conditional format
+            <select id="fmtConditional">
+              <option value="none">None</option>
+              <option value="heatmap">Heatmap (per measure)</option>
+              <option value="bars">Data bars</option>
+              <option value="negative">Negatives in red</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint">Heatmaps and bars scale to each measure's cell range and skip subtotals.</p>
+      </details>
+    </aside>
+
+    <!-- ============================================================ grid -->
+    <main class="main">
+      <div class="viewbar">
+        <div class="viewbar-group" id="summary" aria-live="polite"></div>
+        <div class="viewbar-group" id="levelBar"></div>
+        <div class="viewbar-spacer"></div>
+        <form class="viewbar-group" id="gotoForm" title="Scroll to a cell">
+          <input name="row" inputmode="numeric" placeholder="Row" aria-label="Go to row" size="7">
+          <input name="col" inputmode="numeric" placeholder="Col" aria-label="Go to column" size="4">
+          <button type="submit" class="btn small">Go</button>
+        </form>
+        <button type="button" class="btn small" id="resetView" title="Clear sorting and filters">Reset sort &amp; filters</button>
+        <button type="button" class="btn small" id="refreshBtn" title="Reload the data (grid.refresh)">Refresh</button>
+      </div>
+      <div class="gridwrap">
+        <div id="grid"></div>
+        <div class="empty-state" id="emptyState">
+          <h2>Bring your data, shape it, stress it.</h2>
+          <p>Generate a dataset or drop a CSV on the left, choose what goes in rows, columns and values, then dial in server latency and watch the numbers on the right.</p>
+        </div>
+      </div>
+      <footer class="statusbar">
+        <span id="statusSel" class="status-item"></span>
+        <span id="statusAgg" class="status-item"></span>
+        <span class="viewbar-spacer"></span>
+        <span id="statusEvent" class="status-item muted"></span>
+      </footer>
+    </main>
+
+    <!-- ============================================================ performance -->
+    <aside class="panel right" id="perfPanel" aria-label="Performance">
+      <div class="perf-head">
+        <h2>Performance</h2>
+        <button type="button" class="btn small ghost" id="resetMetrics">Reset</button>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div class="chart-card">
+        <div class="chart-head">
+          <span>Request round trips</span>
+          <span class="legend"><i class="sw lat"></i>network <i class="sw srv"></i>server <i class="sw err"></i>failed / cancelled</span>
+        </div>
+        <canvas id="rttChart" height="110" aria-label="Round-trip time of recent requests"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-head"><span>Frame rate</span><span id="fpsNow" class="muted"></span></div>
+        <canvas id="fpsChart" height="56" aria-label="Frames per second over the last 30 seconds"></canvas>
+      </div>
+      <div class="bench">
+        <button type="button" class="btn block" id="benchBtn">Run scroll benchmark</button>
+        <div id="benchResult" class="bench-result" hidden></div>
+      </div>
+      <div class="log-card">
+        <div class="chart-head"><span>Request log</span><span class="muted" id="logCount"></span></div>
+        <div class="log-scroll">
+          <table class="log">
+            <thead><tr><th>Call</th><th>Detail</th><th class="r">Server</th><th class="r">Total</th></tr></thead>
+            <tbody id="logBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ============================================================ dialogs -->
+  <dialog id="codeDialog" class="dialog wide">
+    <form method="dialog" class="dialog-head">
+      <h2>Code for this setup</h2>
+      <div class="seg" role="radiogroup" aria-label="Code part" id="codeSeg">
+        <button type="button" role="radio" data-v="client">Grid</button>
+        <button type="button" role="radio" data-v="server">Server contract</button>
+      </div>
+      <button type="button" class="btn small" id="copyCode">Copy</button>
+      <button class="btn small ghost" aria-label="Close">✕</button>
+    </form>
+    <pre class="code"><code id="codeOut"></code></pre>
+  </dialog>
+
+  <dialog id="drillDialog" class="dialog wide">
+    <form method="dialog" class="dialog-head">
+      <h2 id="drillTitle">Records behind this cell</h2>
+      <button class="btn small ghost" aria-label="Close">✕</button>
+    </form>
+    <div id="drillMeta" class="drill-meta"></div>
+    <div id="drillGrid" class="drill-grid"></div>
+  </dialog>
+
+  <div id="ctxMenu" class="ctx-menu" role="menu" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

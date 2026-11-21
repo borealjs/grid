@@ -488,3 +488,5 @@
 .vg-cn-check { padding-left: 32px; }
 .vg-row.vg-checked > .vg-cell { background: var(--vg-sel-fill); }
 .vg-seg.vg-checked { color: var(--vg-accent); }
+.vg-seg.vg-has-check > .vg-sl { padding-left: 30px; }
+.vg-colhead, .vg-rowhead, .vg-corner { user-select: none; -webkit-user-select: none; }

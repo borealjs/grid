@@ -99,6 +99,16 @@ test('http source speaks the reference protocol (server.mjs)', async (t) => {
   assert.equal(one.cells[0].length, 6);
   const many = await flat.getCells({ rects: [{ row: 5, col: 1, rowCount: 1, colCount: 2 }, { row: 9, col: 0, rowCount: 2, colCount: 1 }], query: inQ });
   assert.deepEqual(many.cells.map((c) => c.length), [2, 2]);
+  // Row ids come with the cells; the server finds rows by id in any sort / filter (batched per tick).
+  const sorted = q({ sort: [{ column: 3, direction: 'desc' }] });
+  await flat.getCells({ rects: [{ row: 40, col: 0, rowCount: 3, colCount: 1 }], query: sorted });
+  const ids = [40, 41, 42].map((p) => flat.rowIdAt(p, sorted));
+  assert.ok(ids.every((id) => typeof id === 'number'));
+  assert.deepEqual(await Promise.all(ids.map((id) => flat.indexOfRow(id, sorted))), [40, 41, 42]);
+  const unsortedPos = await flat.indexOfRow(ids[0], EMPTY_QUERY);
+  assert.equal(unsortedPos, ids[0] - 1); // the id is the ID column: row + 1
+  const elsewhere = await flat.indexOfRow(ids[0], inQ);
+  assert.ok(elsewhere === -1 || elsewhere >= 0);
 
   const pivot = createHttpSource({ baseUrl: base, params: { mode: 'pivot', rows: 5000, years: 3 } });
   const pl = await pivot.getLayout({ query: q({ sort: [{ level: 0, direction: 'desc' }], columnFilter: [{ level: 1, op: 'in', values: ['FY 2002'] }] }) });
@@ -196,7 +206,7 @@ test('row source: pages by offset / limit, cells by key, shared requests, row lo
   assert.equal(src.rowAt(104, query).id, 'r104');
   assert.equal(src.rowAt(240, query), undefined);
   assert.equal(await src.indexOfRow('r150', query, (row) => row.id), 150);
-  assert.equal(await src.indexOfRow('r240', query, (row) => row.id), -1);
+  assert.equal(await src.indexOfRow('r240', query, (row) => row.id), null); // not loaded: the source cannot tell
   // A filtered view has its own pages and keeps the unfiltered total.
   const filtered = q({ filter: [{ key: 'n', op: 'even' }] });
   assert.deepEqual(await src.getLayout({ query: filtered }), { rowCount: 125, totalRowCount: 250, columnCount: 3 });
@@ -222,4 +232,31 @@ test('row source: a page request is aborted only when every caller gave up', asy
   await assert.rejects(p1);
   assert.equal(aborted, 0);
   assert.deepEqual(await p2, [[1]]);
+});
+
+test('demo backend: rows are found by id at a billion rows, sorted and filtered', async () => {
+  const { handleApiRequest } = await import('../demo-backend.mjs');
+  const call = async (path, extra) => (await handleApiRequest({ url: new URL(`http://x/api/${path}?mode=flat&rows=1000000000&cols=8&latency=0${extra}`) })).body;
+  for (const extra of ['', '&sort=3:a', '&sort=0:d']) {
+    const { rowIds } = await call('block', `&r0=987654321&c0=0&nr=4&nc=1${extra}`);
+    assert.deepEqual((await call('find', `&ids=${rowIds.join(',')}${extra}`)).positions, [987654321, 987654322, 987654323, 987654324]);
+  }
+});
+
+test('reference server: columns are described on demand and a column filter renumbers them', async () => {
+  const { handleApiRequest } = await import('../demo-backend.mjs');
+  const call = async (path, extra = '') => (await handleApiRequest({ url: new URL(`http://x/api/${path}?mode=flat&rows=1000&cols=1000000&latency=0${extra}`) })).body;
+  const meta = await call('meta');
+  assert.equal(meta.columns, true);
+  assert.equal(meta.columnKinds, undefined); // nothing about the million columns is listed up front
+  const { columns } = await call('columns', '&from=0&n=4');
+  assert.deepEqual(columns.map((c) => [c.title, c.type, c.group]), [['ID 1', 'number', 'ID'], ['Name 1', 'text', 'Name'], ['City 1', 'text', 'City'], ['Amount 1', 'number', 'Amount']]);
+  assert.equal((await call('values', '&axis=cols&level=0&q=')).values.length, 8);
+  const cf = `&colfilter=${encodeURIComponent(JSON.stringify([{ dim: 0, op: 'in', v: ['City', 'Amount'] }]))}`;
+  assert.equal((await call('meta', cf)).cols, 250_000);
+  assert.deepEqual((await call('columns', `&from=2&n=2${cf}`)).columns.map((c) => c.title), ['City 2', 'Amount 2']);
+  // Sorting by the kept column 1 (Amount 1) gives the same order as sorting the unfiltered column 3.
+  const kept = await call('block', `&r0=0&c0=1&nr=3&nc=1&sort=1:d${cf}`);
+  const all = await call('block', '&r0=0&c0=3&nr=3&nc=1&sort=3:d');
+  assert.deepEqual(kept.cells, all.cells);
 });

@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react';
 import { createArraySource, type ArraySource, type DataSource } from '@borealjs/grid-core';
 import type { ColumnDef, FilterFns } from './types.js';
 
-const SOURCE_METHODS = ['getRows', 'getCells', 'getLayout', 'getLabels', 'getFilterValues', 'rowAt', 'indexOfRow', 'clearCache'] as const satisfies readonly (keyof DataSource)[];
+const SOURCE_METHODS = ['getRows', 'getCells', 'getLayout', 'getLabels', 'getColumns', 'getFilterValues', 'rowAt', 'rowIdAt', 'indexOfRow', 'clearCache'] as const satisfies readonly (keyof DataSource)[];
 const SOURCE_LIMITS = ['maxRectsPerRequest', 'maxCellsPerRequest'] as const satisfies readonly (keyof DataSource)[];
 
 /** A data source made by useDataSource: `version` moves when its dependencies change. */

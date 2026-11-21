@@ -73,6 +73,7 @@ export function createArraySource<R = any>(rows: R[], { columns, filterFns = {},
   setColumns();
   const views = new Map<string, Uint32Array>(); // query signature -> row indexes in view order
   const distinct = new Map<number, string[]>(); // column -> sorted distinct texts
+  const positions = new Map<string, { getRowId: (row: any) => unknown; map: Map<unknown, number> }>(); // view -> id -> position
 
   function test(cond: Condition): (row: R) => boolean {
     const get = accessors[cond.c!];
@@ -164,16 +165,26 @@ export function createArraySource<R = any>(rows: R[], { columns, filterFns = {},
       if (!columns) setColumns();
       views.clear();
       distinct.clear();
+      positions.clear();
     },
     rowAt(position, query) {
       const idx = view(query);
       return data[idx ? idx[position] : position];
     },
     indexOfRow(id, query, getRowId) {
-      const idx = view(query);
-      const n = idx ? idx.length : data.length;
-      for (let i = 0; i < n; i++) if (getRowId(data[idx ? idx[i] : i]) === id) return i;
-      return -1;
+      // One id -> position index per sort + filter, built on the first lookup (O(rows) once, then O(1)).
+      const sig = JSON.stringify([query?.sort ?? [], query?.filter ?? []]);
+      let hit = positions.get(sig);
+      if (!hit || hit.getRowId !== getRowId) {
+        const idx = view(query);
+        const n = idx ? idx.length : data.length;
+        const map = new Map<unknown, number>();
+        for (let i = 0; i < n; i++) map.set(getRowId(data[idx ? idx[i] : i]), i);
+        hit = { getRowId, map };
+        positions.set(sig, hit);
+        while (positions.size > MAX_VIEWS) positions.delete(positions.keys().next().value as string);
+      }
+      return hit.map.get(id) ?? -1;
     },
     async getLayout({ query }): Promise<TableLayout> {
       const idx = view(query);

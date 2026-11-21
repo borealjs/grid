@@ -6,7 +6,7 @@ import type { Axis } from '../axes/axis.js';
 import type { Condition, ViewKey } from '../query.js';
 import type { SortState } from '../engine/dom.js';
 import type {
-  CellClassResult, CellContext, ColumnDef, CustomFilterApi, FilterValuesResult, HeaderContext, PivotLevels, Progress, Query, Renderer,
+  CellClassResult, CellContext, ColumnDef, ColumnDescription, CustomFilterApi, FilterValuesResult, HeaderContext, PivotLevels, Progress, Query, Renderer,
 } from '../types.js';
 
 export type AxisName = 'rows' | 'cols';
@@ -147,12 +147,22 @@ export interface GridModel {
   /** Sort / filter / column filter changed: update rows / cols. Throws (or rejects) to refuse. */
   applyView?(request: ApplyViewRequest): Promise<void>;
 
+  /** Columns described by the data source (getColumns): what is loaded for a source column, set by the engine. */
+  describe?: (src: number) => ColumnDescription | undefined;
+  /** True when columns are described on demand (the engine loads descriptions with the column titles). */
+  describedColumns?: boolean;
+  /** Descriptions for source columns from … from + n - 1 arrived: drop what was built without them. */
+  columnsDescribed?(from: number, n: number): void;
+
   // Column order and pinned columns (tables).
   /** Visible columns kept at the start while scrolling sideways (they come first). */
   pinnedCols?(): number;
-  /** Source indexes of every column, in display order. */
-  columnOrder?(): number[];
-  setColumnOrder?(order: number[]): void;
+  /** The column order, compact: source indexes and inclusive [first, last] runs. */
+  columnOrder?(): (number | [number, number])[];
+  /** A new order: compact, a list of source indexes, or (column lists) keys. */
+  setColumnOrder?(order: (string | number | [number, number])[]): void;
+  /** Move the visible column at `from` to `to`. */
+  moveColumn?(from: number, to: number): void;
 }
 
 /** Initial query of a model, as request signatures (the engine and the model agree on them). */

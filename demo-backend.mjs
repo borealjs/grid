@@ -13,9 +13,17 @@
 //       merges: merged cells overlapping the requested area, [r0, c0, nr, nc, label?] in source
 //       coordinates (flat mode demo data, unsorted only; pivot mode sends none — set them from code instead).
 //       Used for scattered rows/columns (collapsed pivot groups): one request carries many thin strips.
+//       flat mode also sends rowIds: the ID column of each row (one array per rect for gather).
+//   GET /api/find?mode=flat&ids&sort&filter     -> { positions: number[] }
+//       Where rows (by id, comma-separated, at most MAX_FIND_IDS) are in this sort + filter; -1 when
+//       filtered out. Instant for one sort key at any size; filtered views look in one chunk.
 //   GET /api/labels?mode&axis&level&from&n&sort&…  -> { from, names: string[] }
 //       flat:  axis=cols, level=0 -> column names
 //       pivot: axis=rows|cols, level=0..depth-1 -> group names, level=depth -> leaf names (by leaf index)
+//   GET /api/columns?mode=flat&from&n&colfilter  -> { from, columns: [{ key, title, type, filter, group, width }] }
+//       Describes columns on demand (meta says columns: true), so a million columns are never listed up front.
+//       colfilter keeps columns by group (type name); flat requests then number the kept columns 0, 1, 2, …
+//   GET /api/values?mode=flat&axis=cols&level=0&q  -> column groups, for the column chooser
 //   GET /api/values?mode=pivot&axis&level&q&limit  -> { total, matches, values: string[] }
 //       Distinct names of a row/column dimension (unfiltered data), for the filter dialog: at most
 //       `limit` (≤ MAX_VALUES) of those containing `q`. Columns keep their natural order, rows are sorted.
@@ -76,6 +84,7 @@ const MAX_LABELS = 2000;
 const MAX_VALUES = 1000; // names per filter-dialog response; beyond that the user refines the search
 const MAX_IN_VALUES = 5000; // texts in one 'in' / 'notin' condition
 const MAX_GATHER_RECTS = 500;
+const MAX_FIND_IDS = 1000;
 const DEFAULT_LATENCY = 40;
 const MAX_SORT_KEYS = 4;
 const MULTI_SORT_MAX_ROWS = 5_000_000;
@@ -181,7 +190,7 @@ function feistel(n, key) {
 // ------------------------------------------------------------------ sort spec
 
 /** `3:d,L1:a` -> [{ col: 3, desc: true }, { dim: 1, desc: false }]. Duplicate keys keep the first. */
-function parseSort(param, { cols, depth }) {
+export function parseSort(param, { cols, depth }) {
   if (!param) return [];
   const keys = [];
   const seen = new Set();
@@ -200,13 +209,13 @@ function parseSort(param, { cols, depth }) {
   return keys;
 }
 
-const sortSignature = (keys) => keys.map((k) => `${k.dim !== undefined ? `L${k.dim}` : k.col}:${k.desc ? 'd' : 'a'}`).join(',');
+export const sortSignature = (keys) => keys.map((k) => `${k.dim !== undefined ? `L${k.dim}` : k.col}:${k.desc ? 'd' : 'a'}`).join(',');
 
 /**
  * Parses and normalizes `filter` (JSON). Returns conditions sorted by column, so equal filters have
  * equal signatures. Value checks that depend on the column's type happen when a condition is compiled.
  */
-function parseFilter(param, { cols, depth }) {
+export function parseFilter(param, { cols, depth }) {
   if (!param) return [];
   let list;
   try {
@@ -250,7 +259,7 @@ function parseFilter(param, { cols, depth }) {
   return out.sort((a, b) => (a.dim ?? -1) - (b.dim ?? -1) || (a.c ?? -1) - (b.c ?? -1));
 }
 
-const filterSignature = (filters) => JSON.stringify(filters);
+export const filterSignature = (filters) => JSON.stringify(filters);
 
 /** A test on a name for an 'in' / 'notin' / 'contains' condition. */
 function nameTest(f) {
@@ -396,7 +405,10 @@ const flat = (() => {
     if (filters.length && n > FILTER_MAX_ROWS) {
       throw httpError(`Filtering is limited to ${fmtCount(FILTER_MAX_ROWS)} rows in this demo server (this table has ${fmtCount(n)})`, 422);
     }
-    if (filters.length === 0 && effective.length <= 1) return { count: n, rowAt: baseOrder(n, effective[0]) };
+    if (filters.length === 0 && effective.length <= 1) {
+      const pos = basePosition(n, effective[0]);
+      return { count: n, rowAt: baseOrder(n, effective[0]), positionOf: (r) => (r >= 0 && r < n ? pos(r) : -1) };
+    }
     // Check the conditions before any long work starts.
     const tests = filters.map((cond) => compile(n, cond));
     const key = viewKey(n, effective, filters);
@@ -405,13 +417,11 @@ const flat = (() => {
       const job = startJob(key);
       pending = (async () => {
         if (filters.length === 0) {
-          const order = await buildOrder(n, effective, job);
-          return { count: n, rowAt: (p) => order[p] };
+          return arrayView(n, await buildOrder(n, effective, job));
         }
         if (n > EXACT_FILTER_ROWS) return chunkedView(n, effective[0], tests, job);
         const matches = await scan(n, filters, tests, job);
-        const order = effective.length ? await sortRows(n, matches, effective, job) : matches;
-        return { count: order.length, rowAt: (p) => order[p] };
+        return arrayView(n, effective.length ? await sortRows(n, matches, effective, job) : matches);
       })();
       pending.catch(() => views.delete(key));
       pending.then(() => jobs.delete(key), () => jobs.delete(key));
@@ -424,6 +434,31 @@ const flat = (() => {
     } finally {
       job?.waiters.delete(cancelled);
     }
+  }
+
+  /** position -> row for an order array, and its inverse (built on first use). */
+  function arrayView(n, order) {
+    let inverse = null;
+    return {
+      count: order.length,
+      rowAt: (p) => order[p],
+      positionOf(r) {
+        if (!inverse) {
+          inverse = new Int32Array(n).fill(-1);
+          for (let p = 0; p < order.length; p++) inverse[order[p]] = p;
+        }
+        return r >= 0 && r < n ? inverse[r] : -1;
+      },
+    };
+  }
+
+  /** Position of row r with at most one sort key and no filter (the inverse of baseOrder). */
+  function basePosition(n, sortKey) {
+    if (!sortKey) return (r) => r;
+    const { col, desc } = sortKey;
+    if (col % 8 === 0) return desc ? (r) => n - 1 - r : (r) => r;
+    const f = perm(n, col);
+    return desc ? (r) => n - 1 - f.enc(r) : (r) => f.enc(r);
   }
 
   /** Row at position p with at most one sort key and no filter: instant, via the column's bijection. */
@@ -441,6 +476,7 @@ const flat = (() => {
    */
   async function chunkedView(n, sortKey, tests, job) {
     const base = baseOrder(n, sortKey);
+    const basePos = basePosition(n, sortKey);
     const matches = (r) => {
       for (const test of tests) if (!test(r)) return false;
       return true;
@@ -485,6 +521,13 @@ const flat = (() => {
           else hi = mid - 1;
         }
         return listOf(lo)[p - before[lo]];
+      },
+      // A matching row's chunk follows from its unfiltered position; its place in the chunk's list does the rest.
+      positionOf(r) {
+        if (r < 0 || r >= n || !matches(r)) return -1;
+        const k = Math.floor(basePos(r) / FILTER_CHUNK);
+        const i = listOf(k).indexOf(r);
+        return i < 0 ? -1 : before[k] + i;
       },
     };
   }
@@ -678,34 +721,92 @@ const flat = (() => {
     return out;
   }
 
+  // Column widths per type, so described columns have different widths.
+  const WIDTHS = [110, 170, 120, 130, 120, 110, 90, 110];
+
+  /**
+   * The columns a column filter keeps (by type name, the column "group"), renumbered: { count, srcOf(j),
+   * posOf(src) }. Columns repeat the 8 types, so this is arithmetic at any width.
+   */
+  function colView(cols, filters) {
+    if (!filters.length) return { count: cols, srcOf: (j) => j, posOf: (c) => (c >= 0 && c < cols ? c : -1), all: true };
+    const tests = filters.map(nameTest);
+    const kept = LABELS.map((name, t) => (tests.every((test) => test(name)) ? t : -1)).filter((t) => t >= 0);
+    const k = kept.length;
+    const count = k ? Math.floor(cols / 8) * k + kept.filter((t) => t < cols % 8).length : 0;
+    return {
+      count,
+      srcOf: (j) => Math.floor(j / k) * 8 + kept[j % k],
+      posOf: (c) => {
+        const i = kept.indexOf(c % 8);
+        return i < 0 || c >= cols ? -1 : Math.floor(c / 8) * k + i;
+      },
+      all: false,
+    };
+  }
+
   return {
     view,
     progress,
     merges,
-    meta: (rows, cols, matching = rows) => ({
+    colView,
+    meta: (rows, cv, matching = rows) => ({
       mode: 'flat',
       rows: matching,
       totalRows: rows,
-      cols,
-      columnKinds: KINDS,
-      columnTypes: LABELS,
+      cols: cv.count,
+      columns: true, // columns are described on demand: GET /api/columns
       sort: { multiMaxRows: MULTI_SORT_MAX_ROWS },
       filter: { maxRows: FILTER_MAX_ROWS },
     }),
-    block(rows, v, r0, c0, nr, nc) {
+    /** Row ids (the ID column: data row + 1) of positions r0 … r0 + nr - 1. */
+    rowIds(v, r0, nr) {
+      const ids = new Array(nr);
+      for (let i = 0; i < nr; i++) ids[i] = v.rowAt(r0 + i) + 1;
+      return ids;
+    },
+    block(rows, v, cv, r0, c0, nr, nc) {
       const cells = new Array(nr * nc);
+      const src = Array.from({ length: nc }, (_, k) => cv.srcOf(c0 + k));
       let i = 0;
       for (let r = r0; r < r0 + nr; r++) {
         const dataRow = v.rowAt(r);
-        for (let c = c0; c < c0 + nc; c++) cells[i++] = cell(rows, dataRow, c);
+        for (let k = 0; k < nc; k++) cells[i++] = cell(rows, dataRow, src[k]);
       }
       return cells;
     },
-    labels(cols, axis, level, from, n) {
-      if (axis !== 'cols' || level !== 0 || from >= cols) return null;
+    labels(cv, axis, level, from, n) {
+      if (axis !== 'cols' || level !== 0 || from >= cv.count) return null;
       const names = [];
-      for (let c = from; c < Math.min(cols, from + n); c++) names.push(`${LABELS[c % 8]} ${Math.floor(c / 8) + 1}`);
+      for (let j = from; j < Math.min(cv.count, from + n); j++) {
+        const c = cv.srcOf(j);
+        names.push(`${LABELS[c % 8]} ${Math.floor(c / 8) + 1}`);
+      }
       return names;
+    },
+    /** Descriptions of columns from … from + n - 1 (after the column filter): title, type, filter, group, width. */
+    columns(cv, from, n) {
+      const out = [];
+      for (let j = from; j < Math.min(cv.count, from + n); j++) {
+        const c = cv.srcOf(j);
+        const t = c % 8;
+        const { kind, values } = KINDS[t];
+        out.push({
+          key: `${LABELS[t].toLowerCase()}_${Math.floor(c / 8) + 1}`,
+          title: `${LABELS[t]} ${Math.floor(c / 8) + 1}`,
+          type: kind === 'number' ? 'number' : kind === 'date' ? 'date' : 'text',
+          filter: kind === 'values' ? { type: 'values', values } : kind,
+          group: LABELS[t],
+          width: WIDTHS[t],
+        });
+      }
+      return out;
+    },
+    /** Column groups (type names) for the column chooser. */
+    groups(q, limit) {
+      const needle = q.toLowerCase();
+      const values = LABELS.filter((name) => name.toLowerCase().includes(needle)).slice(0, limit);
+      return { total: LABELS.length, matches: values.length, values };
     },
   };
 })();
@@ -1353,11 +1454,14 @@ export async function handleApiRequest({ url, method = 'GET', readBody = async (
   const latency = int(p.get('latency'), DEFAULT_LATENCY, 0, 5000);
   const pv = mode === 'pivot' ? pivot.build(Math.max(rows, 1), years) : null;
   // Pivot column filter first: sort keys and requests address columns of the filtered column axis.
-  const colFilters = pv ? parseFilter(p.get('colfilter') ?? '', { cols: 0, depth: pv.colTree.depth }) : [];
+  const colFilters = parseFilter(p.get('colfilter') ?? '', { cols: 0, depth: pv ? pv.colTree.depth : 1 });
   const cv = pv ? pivot.colView(pv, colFilters) : null;
-  const shape = pv ? { cols: cv.tree.count, depth: pv.rowTree.depth } : { cols };
-  const keys = parseSort(p.get('sort') ?? '', shape);
-  const filters = parseFilter(p.get('filter') ?? '', shape);
+  // Flat tables: a column filter keeps columns by type name; requests, sorts and filters use the kept columns' numbers.
+  const fcv = pv ? null : flat.colView(cols, colFilters);
+  const shape = pv ? { cols: cv.tree.count, depth: pv.rowTree.depth } : { cols: fcv.count };
+  const toSource = (c) => (fcv && c !== undefined ? fcv.srcOf(c) : c);
+  const keys = parseSort(p.get('sort') ?? '', shape).map((k) => (k.col !== undefined ? { ...k, col: toSource(k.col) } : k));
+  const filters = parseFilter(p.get('filter') ?? '', shape).map((f) => (f.c !== undefined ? { ...f, c: toSource(f.c) } : f));
   const transformed = keys.length > 0 || filters.length > 0;
 
   // How far the sort or scan for these parameters is (polled while /api/meta waits for it).
@@ -1370,7 +1474,7 @@ export async function handleApiRequest({ url, method = 'GET', readBody = async (
     // Flat: only a filter changes the row count (the scan result is reused by the data requests).
     const matching = filters.length ? (await flat.view(rows, keys, filters, cancelled)).count : rows;
     if (cancelled()) return null;
-    return reply(200, flat.meta(rows, cols, matching));
+    return reply(200, flat.meta(rows, fcv, matching));
   }
 
   // Read the body before the simulated wait so a cancelled request is detected afterwards.
@@ -1387,6 +1491,22 @@ export async function handleApiRequest({ url, method = 'GET', readBody = async (
   if (latency > 0) await sleep(latency * (0.5 + Math.random()));
   if (cancelled()) return null; // the client cancelled this request while we waited
 
+  if (url.pathname === '/api/values' && !pv) {
+    if (p.get('axis') !== 'cols' || int(p.get('level'), -1, -1, 64) !== 0) return reply(400, { error: 'flat tables list column groups only (axis=cols, level=0)' });
+    const q = p.get('q') ?? '';
+    if (q.length > 200) return reply(400, { error: 'search text too long' });
+    return reply(200, flat.groups(q, int(p.get('limit'), MAX_VALUES, 1, MAX_VALUES)));
+  }
+
+  // Descriptions of columns (flat tables): title, type, filter, group and width of each.
+  if (url.pathname === '/api/columns') {
+    if (pv) return reply(400, { error: 'columns are described for tables only' });
+    const from = int(p.get('from'), -1, -1, MAX_COLS * 2);
+    const n = int(p.get('n'), 500, 1, MAX_LABELS);
+    if (from < 0 || from >= Math.max(1, fcv.count)) return reply(400, { error: 'columns out of range' });
+    return reply(200, { from, columns: flat.columns(fcv, from, n) });
+  }
+
   if (url.pathname === '/api/values') {
     if (!pv) return reply(400, { error: 'values are listed for pivot dimensions only' });
     const q = p.get('q') ?? '';
@@ -1397,10 +1517,10 @@ export async function handleApiRequest({ url, method = 'GET', readBody = async (
   }
 
   const rowCount = pv ? view.tree.count : view.count;
-  const colCount = pv ? cv.tree.count : cols;
-  const blockOf = (r0, c0, nr, nc) => (pv ? pivot.block(pv, view, cv, r0, c0, nr, nc) : flat.block(rows, view, r0, c0, nr, nc));
+  const colCount = pv ? cv.tree.count : fcv.count;
+  const blockOf = (r0, c0, nr, nc) => (pv ? pivot.block(pv, view, cv, r0, c0, nr, nc) : flat.block(rows, view, fcv, r0, c0, nr, nc));
   // Merged cells belong to the plain layout: in a sorted or filtered view they would join unrelated rows.
-  const mergesOf = (r0, c0, nr, nc) => (pv || transformed ? [] : flat.merges(rows, cols, r0, c0, nr, nc));
+  const mergesOf = (r0, c0, nr, nc) => (pv || transformed || !fcv.all ? [] : flat.merges(rows, cols, r0, c0, nr, nc));
 
   if (url.pathname === '/api/block') {
     const r0 = int(p.get('r0'), -1, -1, MAX_ROWS * 2);
@@ -1409,7 +1529,7 @@ export async function handleApiRequest({ url, method = 'GET', readBody = async (
     const nr = Math.min(int(p.get('nr'), 100, 1, 1000), rowCount - r0);
     const nc = Math.min(int(p.get('nc'), 20, 1, 200), colCount - c0);
     if (nr * nc > MAX_BLOCK_CELLS) return reply(400, { error: 'block too large' });
-    return reply(200, { r0, c0, nr, nc, cells: blockOf(r0, c0, nr, nc), merges: mergesOf(r0, c0, nr, nc) });
+    return reply(200, { r0, c0, nr, nc, cells: blockOf(r0, c0, nr, nc), merges: mergesOf(r0, c0, nr, nc), ...(!pv && { rowIds: flat.rowIds(view, r0, nr) }) });
   }
 
   if (url.pathname === '/api/gather') {
@@ -1429,7 +1549,15 @@ export async function handleApiRequest({ url, method = 'GET', readBody = async (
     if (total > MAX_BLOCK_CELLS) return reply(400, { error: 'too many cells' });
     const cells = rects.map(([r0, c0, nr, nc]) => blockOf(r0, c0, nr, nc));
     const merges = rects.flatMap(([r0, c0, nr, nc]) => mergesOf(r0, c0, nr, nc));
-    return reply(200, { cells, merges });
+    return reply(200, { cells, merges, ...(!pv && { rowIds: rects.map(([r0, , nr]) => flat.rowIds(view, r0, nr)) }) });
+  }
+
+  // Where rows are in this sort and filter: ids (the ID column) -> positions, -1 when filtered out.
+  if (url.pathname === '/api/find') {
+    if (pv) return reply(400, { error: 'rows are found by id in tables only' });
+    const ids = (p.get('ids') ?? '').split(',').filter(Boolean).map(Number);
+    if (!ids.length || ids.length > MAX_FIND_IDS || !ids.every(Number.isSafeInteger)) return reply(400, { error: `ids: 1..${MAX_FIND_IDS} row ids` });
+    return reply(200, { positions: ids.map((id) => view.positionOf(id - 1)) });
   }
 
   if (url.pathname === '/api/labels') {
@@ -1438,7 +1566,7 @@ export async function handleApiRequest({ url, method = 'GET', readBody = async (
     const from = int(p.get('from'), -1, -1, MAX_ROWS * 2);
     const n = int(p.get('n'), 500, 1, MAX_LABELS);
     if (from < 0) return reply(400, { error: 'bad label range' });
-    const names = pv ? pivot.labels(pv, view, cv, axis, level, from, n) : flat.labels(cols, axis, level, from, n);
+    const names = pv ? pivot.labels(pv, view, cv, axis, level, from, n) : flat.labels(fcv, axis, level, from, n);
     if (!names) return reply(400, { error: 'labels out of range' });
     return reply(200, { from, names });
   }

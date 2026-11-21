@@ -20,7 +20,7 @@ export interface RowSourceOptions<Row = any> {
    * Position of a row in the sorted / filtered result (-1 if it is not there). Lets the selection follow
    * a row after a sort, filter or refresh even when that row is not loaded. Optional.
    */
-  indexOfRow?(id: RowId, query: Query, signal?: AbortSignal): MaybePromise<number>;
+  indexOfRow?(id: RowId, query: Query, signal?: AbortSignal): MaybePromise<number | null>;
   /** Rows per request (default 100). */
   pageSize?: number;
   /** Pages kept in memory (default 300). */
@@ -194,7 +194,7 @@ export function createRowSource<Row = any>(options: RowSourceOptions<Row>): RowS
         if (i >= 0) return Number(key.slice(prefix.length)) * pageSize + i;
       }
       if (options.indexOfRow) return options.indexOfRow(id, query);
-      return -1;
+      return null; // not among the loaded rows, and the backend cannot be asked
     },
     clearCache() {
       generation++;

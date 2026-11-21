@@ -146,7 +146,9 @@ place (Escape cancels); pinned columns stay together at the start.
 ```
 
 `onColumnOrderChange` gets the fields in their new order; pass them back as `columnOrder` to restore it.
-`reorderable={false}` on the grid turns dragging off.
+`reorderable={false}` on the grid turns dragging off. With millions of columns, `pinnedColumns={2}`
+pins the first two, and the order is compact: single indexes and `[first, last]` runs such as
+`[[0, 4], 9, [5, 8], [10, 999999]]`.
 
 ## Custom cells
 
@@ -202,13 +204,50 @@ position).
 
 ### Server data: `useDataSource`
 
-Most backends serve rows by offset and limit. Give the grid a `getRows` callback: it asks for the pages on
-screen, reads each cell from the row by its `field`, and gives your cells and events the whole row. Every call
-gets an `AbortSignal`: pass it to `fetch` so requests the grid no longer needs are cancelled.
+The grid never holds the whole table: it asks your callbacks only for what is on screen, and sorting, filtering
+and finding rows happen on your server, so everything works the same for a thousand rows or a billion. Every
+call gets an `AbortSignal`: pass it to `fetch` so requests the grid no longer needs are cancelled. The
+callbacks can use props and state freely; when `deps` change, the grid reloads in place.
+
+| | Use it for | Asks for |
+|---|---|---|
+| `getCells` | any size: billions of rows, millions of columns, pivots | rectangles of cells by position |
+| `getRows` | the quickest start with an ordinary REST, GraphQL or SQL endpoint | pages of row objects by offset / limit |
+
+**Cells: any size.**
 
 ```jsx
-import { VirtualGrid, Column, useDataSource } from '@borealjs/react-grid';
+const source = useDataSource({
+  // How many rows match the current filter.
+  getLayout: async ({ query, signal }) => ({ rowCount: await api.count(query, signal) }),
+  // The cells of one or more rectangles: { row, col, rowCount, colCount }, positions in the sorted, filtered result.
+  getCells: ({ rects, query, signal }) => api.cells(rects, query, signal), // one [[a, b], [c, d]] per rect
+}, [customerId]);
 
+<VirtualGrid dataSource={source} columns={columns} aria-label="Orders" />
+```
+
+The query names columns by `field` (and index):
+
+```js
+sort: [{ key: 'total', column: 2, direction: 'desc' }],
+filter: [
+  { key: 'total', column: 2, op: 'range', min: 100, max: 500 },   // numbers, or dates as 'YYYY-MM-DD'
+  { key: 'product', column: 1, op: 'in', values: ['Lamp'] },      // also 'notin'
+  { key: 'note', column: 4, op: 'contains', text: 'urgent' },
+  { key: 'score', column: 5, op: 'atLeast', value: 90 },          // custom filters
+],
+```
+
+If your server implements the
+[HTTP API in the core guide](https://github.com/borealjs/grid/tree/main/packages/grid-core#ready-made-sources),
+`createHttpSource({ baseUrl, params, headers })` is a ready-made data source for it; the repository's
+reference server serves a billion rows with it.
+
+**Rows by offset / limit.** The quickest way in when your API already pages rows. Cells are read from each row
+by `field`, and your cells and events get the whole row:
+
+```jsx
 function Orders({ customerId }) {
   const source = useDataSource({
     // Rows offset … offset + limit - 1 of the sorted, filtered result, and how many rows match.
@@ -217,13 +256,7 @@ function Orders({ customerId }) {
       const res = await fetch(`/api/orders?${params}`, { signal });
       return res.json(); // { rows: [{ id: 1, product: 'Lamp', total: 120 }, …], total: 48213 }
     },
-
-    // Optional: values for value-list filters.
-    async getFilterValues({ key, search, limit, signal }) {
-      const res = await fetch(`/api/orders/values?field=${key}&q=${encodeURIComponent(search)}&limit=${limit}`, { signal });
-      return res.json(); // { values: ['Lamp', 'Desk', …], total: 3120, matches: 41 }
-    },
-  }, [customerId]); // when these change, the grid reloads in place
+  }, [customerId]);
 
   return (
     <VirtualGrid dataSource={source} getRowId={(row) => row.id} style={{ height: 600 }} aria-label="Orders">
@@ -237,45 +270,35 @@ function Orders({ customerId }) {
 }
 ```
 
-`limit` is 100 by default (the page size). The callbacks can use props and state freely, and re-rendering your
-component doesn't reset the grid.
+`limit` is the page size (100). With SQL, `filter` becomes a parameterized `WHERE`, `sort` an `ORDER BY` (add a
+unique column last so the order is stable) and `offset` / `limit` become `OFFSET` / `LIMIT`. Map `key` to
+column names through an allow-list on the server; never put client text into SQL. Know where it stops: most
+databases walk past every skipped row for `OFFSET`, so pages deep into a huge table get slow, and a row object
+has to carry every column. For those, use `getCells`.
 
-`sort` and `filter` name columns by their `field`:
-
-```js
-sort: [{ key: 'total', direction: 'desc' }],
-filter: [
-  { key: 'total', op: 'range', min: 100, max: 500 },   // numbers, or dates as 'YYYY-MM-DD'
-  { key: 'product', op: 'in', values: ['Lamp'] },      // also 'notin'
-  { key: 'note', op: 'contains', text: 'urgent' },
-  { key: 'score', op: 'atLeast', value: 90 },          // custom filters
-],
-```
-
-With SQL, `filter` becomes a parameterized `WHERE`, `sort` becomes `ORDER BY` (add a unique column last so the
-order is stable) and `offset` / `limit` become `OFFSET` / `LIMIT`. Map `key` to column names through an
-allow-list on the server; never put client text into SQL.
-
-**Cells instead of rows.** For pivots, and tables with thousands of columns, the grid can ask for rectangles of
-cells instead: give `getCells({ rects, query, signal })` and `getLayout({ query, signal })` (the row count)
-instead of `getRows`. A rect is `{ row, col, rowCount, colCount }`, with columns as indexes; answer each with
-its rows of values. If your server implements the
-[HTTP API in the core guide](https://github.com/borealjs/grid/tree/main/packages/grid-core#ready-made-sources),
-`createHttpSource({ baseUrl, params, headers })` is a ready-made data source for it.
+Add `getFilterValues({ key, search, limit, signal })` to either shape for value-list filters
+(`{ values, total, matches }`).
 
 ### Row ids: `getRowId`
 
-Give each row a stable id and the grid keeps track of rows, not positions: after a sort, a filter, new `rows` or
-`refresh()`, the selection stays on the row it was on (and moves to the first row if that row is gone), and
-checked rows are remembered by id.
+With an id for each row the grid keeps track of rows, not positions: after a sort, a filter, new `rows` or
+`refresh()`, the selection stays on its row, and checked rows from another sort or filter are shown where they
+are now.
 
 ```jsx
 <VirtualGrid rows={rows} getRowId={(row) => row.id} />
 ```
 
-In-memory rows default to the row object itself, so pass `getRowId` when you replace rows with new objects (as
-React state updates do). With `getRows`, the grid finds a moved row among the pages it has loaded; to find rows
-further away, add `indexOfRow(id, query)` to the data source (it returns the row's position, or -1).
+- In-memory rows default to the row object itself, so pass `getRowId` when you replace rows with new objects
+  (as React state updates do).
+- The data source finds rows with `indexOfRow(id, query)`: the position, `-1` when the row is not in that view,
+  `null` when it cannot tell. In-memory rows and `createHttpSource` do it at any size; `getRows` sources find
+  rows among the pages they loaded, or ask your `indexOfRow`. `getCells` sources can give ids with
+  `rowIdAt(position, query)`.
+- When the selected row is gone, or the source cannot tell where it went, the selection moves to the first row
+  and a notice says so. Reword it with `messages={{ selectionRowGone, selectionNotFollowed }}`;
+  `onSelectionChange` reports `moved: 'rowGone' | 'notFollowed'`. Without row ids a sort or filter does the same,
+  and a refresh keeps the position.
 
 ## Sorting and filtering
 
@@ -400,14 +423,27 @@ pass `selectedCells={{ active, ranges }}`.
 a range, and Space checks the active row.
 
 ```jsx
-const [checked, setChecked] = useState({ all: false, ids: [] });
+const grid = useRef(null);
+const [checked, setChecked] = useState({ checks: [] });
 
-<VirtualGrid rows={rows} getRowId={(row) => row.id} rowSelection selectedRows={checked} onRowSelectionChange={setChecked} />
+<VirtualGrid ref={grid} rows={rows} getRowId={(row) => row.id} rowSelection selectedRows={checked} onRowSelectionChange={setChecked} />
+<span>{grid.current?.checkedCount() ?? 'Some'} checked</span>
 ```
 
-The value is `{ all: false, ids }`, or `{ all: true, except }` after the corner checkbox (every row matching
-the filter, minus some: it works for a billion rows, where listing ids would not). Without `getRowId` rows are
-kept by position, and the checks clear when the sort or filter changes.
+Checked rows are steps in the order they were made; the last step covering a row decides:
+
+```js
+{ checks: [
+  { from: 0, to: 49_999_999, query, checked: true },   // Shift+click: rows 1 to 50,000,000 of that sort / filter
+  { id: 812, checked: false },                         // then one row unchecked
+] }
+```
+
+A range costs the same for 10 rows or 50 million and needs no rows loaded, so checking works the same at any
+size, and memory grows with clicks, not rows. Your server can act on the same steps to delete or export what is
+checked. `checkedCount()` counts them when it can without the server. Rows checked in another sort or filter
+are placed through `indexOfRow`; if that is not possible a notice says so (`messages.checksNotShown`) and they
+stay checked.
 
 ## Cell events
 
@@ -659,7 +695,7 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 | `dataSource` | `DataSource` | | or your backend ([server data](#server-data-usedatasource)) |
 | `getRowId` | `(row) => string \| number` | in-memory: the row itself | stable row ids ([row ids](#row-ids-getrowid)) |
 | `columns` | `ColumnDef<Row>[]` | | or `<Column>` children |
-| `columnCount`, `getColumn` | `number`, `(index) => ColumnDef` | | instead of `columns`, for thousands of columns |
+| `columnCount`, `getColumn` | `number`, `(index) => ColumnDef` | | instead of `columns`, for thousands of columns (or let the data source describe them: `getColumns`) |
 | `rowCount` | `number` | | row count when the data source has no `getLayout` |
 | `filterFns` | `{ [op]: (cellValue, value, row) => boolean }` | | custom filter operators for `rows` |
 
@@ -678,6 +714,7 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 | `notices` | `boolean` | `true` | short messages in the grid: copies, and slow, refused or failed sorts and filters |
 | `columnChooser` | `boolean` | on when columns have a `group` | a corner menu to show and hide column groups |
 | `rowSelection` | `boolean` | `false` | [row checkboxes](#row-checkboxes) |
+| `pinnedColumns` | `number` | columns marked `pinned` | pin this many leading columns |
 | `reorderable` | `boolean` | `true` | drag column headers to reorder |
 
 #### Look
@@ -705,8 +742,8 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 | `filter`, `defaultFilter` | `FilterItem[]` | |
 | `columnFilter`, `defaultColumnFilter` | `ColumnFilterItem[]` | which column groups are shown |
 | `selectedCells` | `{ active, ranges }` | controlled selection |
-| `selectedRows` | `{ all: false, ids } \| { all: true, except }` | checked rows |
-| `columnOrder` | `string[]` | column fields in display order |
+| `selectedRows` | `{ checks: RowCheck[] }` | checked rows |
+| `columnOrder` | `string[]` | column fields in display order (compact runs with `getColumn`) |
 
 #### Events
 
@@ -719,7 +756,7 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 | `onCopy` | `{ ok, cells, rows, cols, ms, reason? }` |
 | `onColumnResize` | `{ column, key, width }`, when the user lets go |
 | `onColumnOrderChange` | fields in their new order, after a drag |
-| `onRowSelectionChange` | `{ all, ids }` or `{ all, except }` |
+| `onRowSelectionChange` | `{ checks }` |
 | `onCellClick`, `onCellDoubleClick`, `onCellContextMenu` | the cell's context plus `key` and `event` ([cell events](#cell-events)) |
 | `onViewChange` | `{ what, pending, progress? }` while a sort or filter runs, then `{ what, ok, rows, reason? }` or `{ what, cancelled: true }` |
 | `onError` | `(error, { kind: 'layout' \| 'cells' \| 'labels' })`; errors are logged when this is not set |
@@ -758,7 +795,7 @@ What the `ref` gives you.
 | `scrollToCell(row, col?)` | bring a cell into view |
 | `refresh()` | reload the visible data (it changed on the server) |
 | `getRow(rowIndex)` | the record behind a visible row, when loaded |
-| `getRowSelection()`, `setRowSelection(sel)` | checked rows |
+| `getRowSelection()`, `setRowSelection(sel)`, `checkedCount()` | checked rows |
 | `getColumnOrder()`, `setColumnOrder(fields)` | column order |
 | `getQuery()`, `getSort()`, `getFilter()`, `getColumnFilter()` | the current sort and filters |
 | `setSort(sort)`, `setFilter(filter)`, `setColumnFilter(list)` | change uncontrolled state; resolve to `false` if refused |
@@ -796,8 +833,12 @@ built in.
 **Clicking a button in a cell selects the cell.** Links, buttons and form fields are handled for you; add
 `data-vg-interactive` to other clickable elements.
 
-**How do I show 10,000+ columns?** Use `columnCount` and `getColumn(index)` instead of an array. Titles you
-leave out can come from the data source's `getLabels`.
+**How do I show 10,000+ columns?** Don't list them: return `columnCount` from `getLayout` and add
+`getColumns({ start, count, query, signal })` to the data source. It describes the columns coming into view
+(`[{ key, title, type, filter, width, group }]`), so a million distinct columns keep their types, filters and
+widths without being sent up front, and the column chooser (`columnChooser`) asks the server for groups.
+Functions such as `format` or `renderCell` still come from `getColumn(index)` in code, which wins over the
+description. `createHttpSource` supports it when the server sends `columns: true` in `meta`.
 
 **Can I use it without React?** Yes: [`@borealjs/grid-core`](https://www.npmjs.com/package/@borealjs/grid-core)
 has the same features with a plain JavaScript API.

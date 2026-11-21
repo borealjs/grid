@@ -65,9 +65,13 @@ interface Kept {
   vx: number;
   vy: number;
   query: Query;
-  columnOrder?: (string | number)[];
+  columnOrder?: (string | number | [number, number])[];
   rowSelection?: RowSelection;
 }
+
+/** Compact order ([first, last] runs and indexes) -> every source index (column lists only: small). */
+const expandOrder = (order: (number | [number, number])[]): number[] =>
+  order.flatMap((x) => (Array.isArray(x) ? Array.from({ length: x[1] - x[0] + 1 }, (_, i) => x[0] + i) : [x]));
 
 const isRowSource = (s: unknown): s is RowSource => !!s && typeof (s as RowSource).setColumns === 'function' && 'hasColumns' in (s as object);
 
@@ -144,6 +148,8 @@ export class Grid {
     const getRowId = typeof o.getRowId === 'function' ? (row: unknown) => this.#opts.getRowId!(row) : inMemory ? (row: unknown) => row as RowId : undefined;
     const currentQuery = () => this.#engine?.query ?? initialQuery;
     const keyOfSource = (s: number) => this.#engine?.model.keyOf?.(s) ?? keyOf(s) ?? s;
+    // Column lists report their order as keys; very wide tables keep the compact form.
+    const publicOrder = (order: (number | [number, number])[]) => (Array.isArray(o.columns) ? expandOrder(order).map(keyOfSource) : order);
     const canGather = (source.maxRectsPerRequest ?? 400) > 1;
     const engine = new GridEngine(this.#host, {
       model,
@@ -176,24 +182,28 @@ export class Grid {
       renderEmpty: o.renderEmpty && ((el, ctx) => this.#opts.renderEmpty?.(el, ctx)),
       // The data record behind a row, for cell renderers (in-memory sources can tell; servers usually not).
       rowAt: typeof source.rowAt === 'function' ? (position) => source.rowAt!(position, currentQuery()) : undefined,
+      // A row's id: getRowId on its record, or (getCells sources whose server sends ids) the source's own.
       rowId: getRowId && typeof source.rowAt === 'function'
         ? (position) => {
           const row = source.rowAt!(position, currentQuery());
           return row === undefined || row === null ? undefined : getRowId(row);
         }
-        : undefined,
-      findRow: getRowId && typeof source.indexOfRow === 'function' ? (id) => source.indexOfRow!(id, currentQuery(), getRowId) : undefined,
+        : typeof source.rowIdAt === 'function' ? (position) => source.rowIdAt!(position, currentQuery()) : undefined,
+      findRow: typeof source.indexOfRow === 'function' ? (id, query) => source.indexOfRow!(id, query, getRowId ?? ((row: unknown) => row as RowId)) : undefined,
       rowSelection: !!o.rowSelection,
       hasHandler: (name) => typeof this.#opts[name] === 'function',
       ...(Object.fromEntries(CALLBACKS.map((n) => [n, latest(n)])) as Pick<GridOptions, (typeof CALLBACKS)[number]>),
       onError: (err, ctx) => this.#error(err, ctx),
-      onColumnOrderChange: (order) => this.#opts.onColumnOrderChange?.(order.map(keyOfSource)),
+      onColumnOrderChange: (order) => this.#opts.onColumnOrderChange?.(publicOrder(order)),
       fetchBlock: async ({ r0, c0, nr, nc, signal, query }): Promise<BlockPayload> => {
         const out = await getCells([{ row: r0, col: c0, rowCount: nr, colCount: nc }], query, signal);
         return { cells: out.cells[0], merges: out.merges };
       },
       fetchGather: canGather
         ? ({ rects, signal, query }): Promise<GatherPayload> => getCells(rects.map(([row, col, rowCount, colCount]) => ({ row, col, rowCount, colCount })), query, signal)
+        : undefined,
+      fetchColumns: typeof source.getColumns === 'function'
+        ? async ({ from, n, signal, query }) => source.getColumns!({ start: from, count: n, query, signal })
         : undefined,
       fetchLabels: async ({ axis, level, from, n, signal, query }) => {
         if (typeof source.getLabels !== 'function') return Array.from({ length: n }, (_, i) => String(from + i + 1));
@@ -281,7 +291,7 @@ export class Grid {
     }
     if (changed.some((k) => (HOOKS as readonly OptionKey[]).includes(k))) e.repaint();
     if (changed.includes('selectedRows') && next.selectedRows) e.setRowSelection(next.selectedRows);
-    if (changed.includes('columnOrder') && Array.isArray(next.columnOrder)) e.setColumnOrder(next.columnOrder.map((k) => (typeof k === 'number' ? k : this.#colOfKey(k))));
+    if (changed.includes('columnOrder') && Array.isArray(next.columnOrder)) e.setColumnOrder(next.columnOrder);
     const tasks: Promise<boolean>[] = [];
     if (changed.includes('columnFilter')) tasks.push(this.setColumnFilter(next.columnFilter ?? []));
     if (changed.includes('filter')) tasks.push(this.setFilter(next.filter ?? []));
@@ -371,21 +381,24 @@ export class Grid {
     return this.#source.rowAt(e.rowSource(rowIndex), e.query);
   }
 
-  /** Checked rows (rowSelection): { all: false, ids } or { all: true, except }. */
-  getRowSelection(): RowSelection { return this.#engine?.getRowSelection() ?? { all: false, ids: [] }; }
+  /** Checked rows (rowSelection): steps, the last one covering a row decides (see RowSelection). */
+  getRowSelection(): RowSelection { return this.#engine?.getRowSelection() ?? { checks: [] }; }
+
+  /** How many rows are checked, when it can be told without asking the server (undefined otherwise). */
+  checkedCount(): number | undefined { return this.#engine?.checkedCount(); }
 
   setRowSelection(selection: RowSelection): void { this.#engine?.setRowSelection(selection); }
 
-  /** Column order: keys (or source indexes for columns without a key). */
-  getColumnOrder(): (string | number)[] {
+  /** Column order: keys (or source indexes) for column lists; compact runs for getColumn tables (see columnOrder). */
+  getColumnOrder(): (string | number | [number, number])[] {
     const e = this.#engine;
     const order = e?.model.columnOrder?.();
     if (!order) return [];
-    return order.map((s) => e!.model.keyOf?.(s) ?? s);
+    return Array.isArray(this.#opts.columns) ? expandOrder(order).map((s) => e!.model.keyOf?.(s) ?? s) : order;
   }
 
-  setColumnOrder(order: (string | number)[]): void {
-    this.#engine?.setColumnOrder(order.map((k) => (typeof k === 'number' ? k : this.#colOfKey(k))));
+  setColumnOrder(order: (string | number | [number, number])[]): void {
+    this.#engine?.setColumnOrder(order);
   }
 
   /** Redraw cells and headers without reloading data. */

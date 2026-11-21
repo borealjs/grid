@@ -25,7 +25,7 @@ const PASS = [
   'layout', 'rowCount', 'columnCount', 'rowHeight', 'headerHeight', 'columnWidth', 'minColumnWidth',
   'columnChooser', 'columnGroups', 'theme', 'sortable', 'filterable', 'resizable', 'multiSort', 'expandable',
   'selection', 'copy', 'keyboard', 'notices', 'defaultSort', 'defaultFilter', 'defaultColumnFilter', 'blockRows', 'blockCols',
-  'rowHeaderWidths', 'model', 'isMac', 'rowSelection', 'reorderable',
+  'rowHeaderWidths', 'model', 'isMac', 'rowSelection', 'reorderable', 'pinnedColumns',
 ] as const satisfies readonly (keyof Props & keyof GridOptions)[];
 /** Object props compared shallowly, so inline objects do not rebuild the grid. */
 const OBJECTS = ['rowHeader', 'messages'] as const satisfies readonly (keyof Props & keyof GridOptions)[];
@@ -59,7 +59,8 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
   const list = collectColumns(props.columns, props.children);
   const { core: columns, fnVersion } = useCoreColumns(list, store);
   const getColumn = useMemo(() => (props.getColumn ? (i: number) => toCoreColumn(props.getColumn!(i), store) : undefined), [props.getColumn, store]);
-  const stableObjects = useShallowStable(Object.fromEntries(OBJECTS.map((k) => [k, props[k]])));
+  // Each object prop on its own: an inline `messages={{ … }}` with the same entries is no change.
+  const stableObjects = { rowHeader: useShallowStable(props.rowHeader), messages: useShallowStable(props.messages) } satisfies Record<(typeof OBJECTS)[number], unknown>;
 
   // In-memory rows: one source per column structure; new `rows` arrays go in with setRows + refresh.
   const filterFnsRef = useRef(props.filterFns);

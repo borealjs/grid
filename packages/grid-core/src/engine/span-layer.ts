@@ -151,7 +151,7 @@ export class SpanLayer {
         e.shift = shift;
       }
       const pending = seg.label === undefined;
-      const cls = `vg-seg${seg.cls ? ` ${seg.cls}` : ''}${pending ? ' vg-ph' : ''}${seg.selected ? ' vg-sel' : ''}${this.withSort && seg.sort ? ' vg-sortable' : ''}${this.withSort && seg.filter ? ' vg-filterable' : ''}${seg.check ? ' vg-checked' : ''}`;
+      const cls = `vg-seg${seg.cls ? ` ${seg.cls}` : ''}${pending ? ' vg-ph' : ''}${seg.selected ? ' vg-sel' : ''}${this.withSort && seg.sort ? ' vg-sortable' : ''}${this.withSort && seg.filter ? ' vg-filterable' : ''}${seg.check !== undefined ? ' vg-has-check' : ''}${seg.check ? ' vg-checked' : ''}`;
       if (cls !== e.cls) {
         e.el.className = cls;
         e.cls = cls;

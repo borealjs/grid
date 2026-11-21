@@ -32,7 +32,13 @@ export class ResizableAxis<A extends Axis = Axis> implements Axis {
     this.#rebuild();
   }
 
-  /** Call after the base axis changed its layout (collapse / expand, or a new base). */
+  /** Sizes for source items, all at once (e.g. widths from column descriptions). */
+  setSourceSizes(entries: readonly [number, number][]): void {
+    for (const [src, px] of entries) this.overrides.set(src, px);
+    this.#rebuild();
+  }
+
+    /** Call after the base axis changed its layout (collapse / expand, or a new base). */
   refresh(): void {
     this.#rebuild();
   }

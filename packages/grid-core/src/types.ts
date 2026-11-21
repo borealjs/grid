@@ -66,6 +66,8 @@ export interface TableLayout {
   /** Rows without any filter (for "filtered from" texts). */
   totalRowCount?: number;
   columnCount?: number;
+  /** false: the data source has getColumns but this table does not use it (e.g. an older server). */
+  describedColumns?: boolean;
   /** Largest table a multi-column sort / a filter may be asked for (the grid refuses beyond). */
   maxSortRows?: number;
   maxFilterRows?: number;
@@ -163,13 +165,53 @@ export interface RowsResult<Row = any> {
 /** A row's stable id (from getRowId). */
 export type RowId = string | number;
 
-/** Checked rows: a list of ids, or every row (matching the filter) except some. */
-export type RowSelection = { all: false; ids: RowId[] } | { all: true; except: RowId[] };
+/**
+ * One step of row checking: a row by id, or rows `from` … `to` (positions) in the order of `query` (its sort
+ * and filter). A range costs the same for 10 rows or 50 million.
+ */
+export type RowCheck =
+  | { id: RowId; checked: boolean }
+  | { from: number; to: number; query: Query; checked: boolean };
+
+/**
+ * Checked rows: steps in the order they were made; the last step that covers a row decides whether it is
+ * checked. The header checkbox is one range over the whole view; clearing it empties the list.
+ */
+export interface RowSelection {
+  checks: RowCheck[];
+}
 
 export interface GetLayoutRequest {
   query: Query;
   signal?: AbortSignal;
   onProgress?(progress: Progress): void;
+}
+
+/** A block of columns to describe: columns `start` … `start + count - 1` (under the query's column filter). */
+export interface GetColumnsRequest {
+  start: number;
+  count: number;
+  query: Query;
+  signal?: AbortSignal;
+}
+
+/**
+ * What a data source can tell about a column (getColumns): plain data, so a server can send it. Functions such
+ * as `format` or `renderCell` come from `getColumn(index)` in code and win over these.
+ */
+export interface ColumnDescription {
+  key?: string;
+  title?: string;
+  type?: 'text' | 'number' | 'date';
+  width?: number;
+  align?: 'start' | 'end' | 'center';
+  sortable?: boolean;
+  resizable?: boolean;
+  reorderable?: boolean;
+  group?: string;
+  className?: string;
+  headerClass?: string;
+  filter?: false | 'text' | 'number' | 'date' | 'values' | { type: 'values'; values?: string[] };
 }
 
 export interface GetLabelsRequest {
@@ -204,12 +246,27 @@ export interface DataSource<V = unknown> {
   getLayout?(request: GetLayoutRequest): MaybePromise<Layout>;
   /** Header labels for very large axes (pivot groups, column titles not given in column definitions). */
   getLabels?(request: GetLabelsRequest): MaybePromise<(string | null)[]>;
+  /**
+   * Describe columns on demand (tables with very many columns): one ColumnDescription per column asked for.
+   * The grid asks for the columns on screen, so a million distinct columns keep their titles, types, filters
+   * and widths without describing them all up front. With it, the column chooser asks the server too
+   * (getFilterValues for `{ axis: 'cols', level: 0 }`, and the column filter in the query).
+   */
+  getColumns?(request: GetColumnsRequest): MaybePromise<ColumnDescription[]>;
   /** Distinct values for value-list filters (first `limit` matching `search`). */
   getFilterValues?(request: FilterValuesRequest): MaybePromise<FilterValuesResult>;
   /** The record at a position of the sorted / filtered view, if loaded (gives cells ctx.row). */
   rowAt?(position: number, query: Query): unknown;
-  /** Position of the row with this id in the sorted / filtered view, or -1. Lets the selection follow rows. */
-  indexOfRow?(id: RowId, query: Query, getRowId: (row: any) => RowId): MaybePromise<number>;
+  /**
+   * Id of the row at a position, when known without its record (getCells sources whose server sends row
+   * ids). Sources with records use getRowId on rowAt instead.
+   */
+  rowIdAt?(position: number, query: Query): RowId | undefined;
+  /**
+   * Position of the row with this id in the sorted / filtered view: -1 when it is not in it (filtered out,
+   * deleted), null when the source cannot tell. Lets the selection and checked rows follow rows.
+   */
+  indexOfRow?(id: RowId, query: Query, getRowId: (row: any) => RowId): MaybePromise<number | null>;
   /** Drop cached data (grid.refresh() calls it). */
   clearCache?(): void;
   /** Rects per getCells call (default 400; 1 = one rect per call). */
@@ -344,6 +401,12 @@ export interface Messages {
   /** Row checkbox (rowSelection). */
   selectRow: string;
   selectAllRows: string;
+  /** After a sort, filter or refresh, the selected row is not in the view any more (the selection is on the first row). */
+  selectionRowGone: string;
+  /** After a sort or filter, the grid could not tell where the selected row went (the selection is on the first row). */
+  selectionNotFollowed: string;
+  /** Some checked rows could not be placed in the current sort / filter (they stay checked). */
+  checksNotShown: string;
   columns: string;
   applying: string;
   cancel: string;
@@ -389,6 +452,11 @@ export interface SelectionInfo {
   rows: number;
   cols: number;
   cells: number;
+  /**
+   * Set when the selection moved by itself after a sort, filter or refresh: its row is not in the view any
+   * more ('rowGone'), or the grid could not tell where it went ('notFollowed'). It is then on the first row.
+   */
+  moved?: 'rowGone' | 'notFollowed';
 }
 
 export interface CopyInfo {
@@ -524,8 +592,13 @@ export interface GridOptions<V = unknown> {
   controlled?: ControlledParts;
   /** Checked rows (with rowSelection). Applied when it changes; onRowSelectionChange reports clicks. */
   selectedRows?: RowSelection;
-  /** Column order by key (or source index for columns without a key); pinned columns stay first. */
-  columnOrder?: (string | number)[];
+  /**
+   * Column order: keys (or source indexes) in display order. Very wide tables (getColumn) use a compact
+   * form: source indexes and inclusive [first, last] runs, e.g. [[0, 4], 9, [5, 8], [10, 999999]].
+   */
+  columnOrder?: (string | number | [number, number])[];
+  /** Pin this many leading columns (default: the columns marked `pinned`). Works with getColumn tables too. */
+  pinnedColumns?: number;
 
   // Grid-wide hooks (columns can override them)
   format?(value: V, ctx: CellContext<V> | null): string;
@@ -543,8 +616,8 @@ export interface GridOptions<V = unknown> {
   onSelectionChange?(info: SelectionInfo): void;
   onCopy?(info: CopyInfo): void;
   onColumnResize?(info: ColumnResizeInfo): void;
-  /** A column was dragged to another place: the new order (keys, or source indexes for unkeyed columns). */
-  onColumnOrderChange?(order: (string | number)[]): void;
+  /** A column was dragged to another place: the new order, in the same form as `columnOrder`. */
+  onColumnOrderChange?(order: (string | number | [number, number])[]): void;
   onRowSelectionChange?(selection: RowSelection): void;
   onCellClick?(e: CellEvent<V>): void;
   onCellDoubleClick?(e: CellEvent<V>): void;

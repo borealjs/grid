@@ -130,7 +130,7 @@ function InMemoryDemo({ grid: gridProps }) {
   const [filter, setFilter] = useState([]); // controlled
   const [highlight, setHighlight] = useState('');
   const [selection, setSelection] = useState(null);
-  const [checked, setChecked] = useState({ all: false, ids: [] });
+  const [checked, setChecked] = useState({ checks: [] });
   const grid = useRef(null);
 
   return (
@@ -203,16 +203,18 @@ function InMemoryDemo({ grid: gridProps }) {
         <span>Sort: {sort.length ? describeSort(sort) : 'none'}</span>
         <span>Filter: {filter.length ? describeFilter(filter) : 'none'}</span>
         <span>{rows.length.toLocaleString()} rows loaded</span>
-        <span>{describeChecked(checked, rows.length)}</span>
+        <span>{describeChecked(grid.current, checked)}</span>
         {selection && <span>Cell {selection.active.r + 1}, {selection.active.c + 1}: {selection.text ?? '…'}{selection.cells > 1 ? ` · ${selection.cells.toLocaleString()} cells` : ''}</span>}
       </footer>
     </section>
   );
 }
 
-const describeChecked = (sel, total) => {
-  const n = sel.all ? total - sel.except.length : sel.ids.length;
-  return n ? `${n.toLocaleString()} checked` : 'None checked';
+// Checked rows are steps (ids and position ranges); the grid counts them when it can without the server.
+const describeChecked = (grid, sel) => {
+  if (!sel.checks.length) return 'None checked';
+  const n = grid?.checkedCount();
+  return n === undefined ? 'Some rows checked' : `${n.toLocaleString()} checked`;
 };
 
 // ------------------------------------------------------------------ custom backend (useDataSource)
@@ -255,7 +257,8 @@ function CustomBackendDemo({ grid: gridProps }) {
   const [term, setTerm] = useState('');
   const [open, setOpen] = useState(null);
   const [menu, setMenu] = useState(null);
-  const [checked, setChecked] = useState({ all: false, ids: [] });
+  const grid = useRef(null);
+  const [checked, setChecked] = useState({ checks: [] });
   // getRows: pages of rows by offset / limit. Callbacks may use props and state; when `term` changes the
   // grid reloads in place.
   const source = useDataSource({
@@ -275,6 +278,7 @@ function CustomBackendDemo({ grid: gridProps }) {
       </div>
       <div className="split">
         <VirtualGrid
+          ref={grid}
           className="grid"
           aria-label="Orders"
           dataSource={source}
@@ -325,7 +329,7 @@ function CustomBackendDemo({ grid: gridProps }) {
         </ul>
       )}
       <footer className="status">
-        <span>{checked.all ? `All orders checked${checked.except.length ? ` except ${checked.except.length}` : ''}` : `${checked.ids.length} checked`}</span>
+        <span>{describeChecked(grid.current, checked)}</span>
       </footer>
     </section>
   );
@@ -521,20 +525,11 @@ function HugeTableDemo({ grid: gridProps }) {
   const [layout, setLayout] = useState(null);
   const [error, setError] = useState(null);
   const [timing, onViewChange] = useViewTiming();
+  const [checked, setChecked] = useState({ checks: [] });
   useEffect(() => {
     setLayout(null);
     source.getLayout({ query: EMPTY_QUERY }).then(setLayout, setError);
   }, [source]);
-  // A million columns are described by index; titles come from the server (getLabels).
-  const getColumn = useMemo(() => {
-    if (!layout) return undefined;
-    const kinds = layout.meta.columnKinds ?? [];
-    const types = layout.meta.columnTypes ?? [];
-    return (i) => {
-      const k = kinds[i % kinds.length];
-      return { group: types[i % types.length], type: k?.kind === 'number' ? 'number' : undefined, filter: k?.kind === 'values' ? { type: 'values', values: k.values } : k?.kind };
-    };
-  }, [layout]);
   if (error) return <p className="note">{IN_BROWSER ? 'Could not load the table' : 'Start the reference server first (npm start, port 5174)'}: {error.message}</p>;
   return (
     <section className="demo">
@@ -545,6 +540,7 @@ function HugeTableDemo({ grid: gridProps }) {
         fields={[{ name: 'rows', label: 'Rows', value: params.rows, max: 1e14 }, { name: 'cols', label: 'Columns', value: params.cols, max: 1e12, size: 11 }]}
       >
         <span className="muted">Filtering a billion rows scans them all here (about half a minute); the grid shows progress and lets you cancel.</span>
+        <span className="muted">{describeChecked(grid.current, checked)}</span>
       </ServerToolbar>
       {layout ? (
         <VirtualGrid
@@ -555,9 +551,11 @@ function HugeTableDemo({ grid: gridProps }) {
           dataSource={source}
           layout={layout}
           columnCount={layout.columnCount}
-          getColumn={getColumn}
           columnChooser
-          columnGroups={layout.meta.columnTypes}
+          pinnedColumns={1}
+          rowSelection
+          selectedRows={checked}
+          onRowSelectionChange={setChecked}
           onViewChange={onViewChange}
           {...gridProps}
           messages={{ ...DEMO_LIMITS, ...gridProps.messages }}

@@ -24,14 +24,16 @@
 
 - **Any size.** Smooth scrolling through billions of rows and millions of columns; only what is on screen is
   loaded.
-- **Any data.** An array in memory, or your backend: rows by offset / limit, as most REST, GraphQL and SQL
-  APIs serve them, or rectangles of cells for pivots and very wide tables.
+- **Any data, no size limit from the library.** An array in memory, or your backend: it is asked only for what
+  is on screen, and sorting, filtering and finding rows happen there, so every feature works the same on a
+  billion rows. Rows by offset / limit are the quickest start with an ordinary API.
 - **Sorting and filtering.** Multi-column sort; filters for ranges, dates, text and searchable value lists,
   plus your own.
 - **Pivots.** Grouped row and column headers, subtotals, expand and collapse.
 - **Spreadsheet feel.** Range selection, copy into Excel or Google Sheets, merged cells, full keyboard support.
-- **App essentials.** Pinned columns, drag-to-reorder columns, row checkboxes, stable row ids, cell click,
-  double-click and context-menu events.
+- **App essentials, at any size.** Pinned and drag-to-reorder columns (also with a million columns), row
+  checkboxes that can check 50 million rows in one Shift+click, a selection that stays on its row through sorts
+  and filters, cell click, double-click and context-menu events.
 - **Yours to shape.** Custom cells, headers, filters and empty state; theme with CSS variables; dark mode;
   translations.
 - **Small.** About 40 kB gzipped, no dependencies, TypeScript types included.
@@ -108,7 +110,10 @@ The [live demo](https://borealjs.github.io/grid/) shows React cells and filters,
 merged cells, and a billion-row table with size and latency controls and live stats. Its Options panel turns
 every setting on and off and gives you the code for it, in React or plain JavaScript.
 
-The repository also has a [plain JavaScript example](examples/vanilla), with no React. To run both on your
+The repository also has a [plain JavaScript example](examples/vanilla), with no React, and a
+[playground](examples/playground): load your own CSV or generate millions of rows, drag fields into rows,
+columns and values, set the server latency, and watch requests, timings and frame rate live. It runs at
+http://localhost:5174/examples/playground/ with `npm start`. To run both on your
 machine:
 
 ```bash

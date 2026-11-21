@@ -12,24 +12,11 @@ for (const key of ['rows', 'cols', 'years', 'latency']) {
 }
 
 const source = createHttpSource({ baseUrl: '/api', params: Object.fromEntries(apiParams) });
-// Read the layout once here (the demo needs the flat table's column types); the grid reuses it.
+// Read the layout once here (the grid reuses it). A million columns are described by the server on demand
+// (its /columns request: title, type, filter, group, width), so nothing about them is listed up front; the
+// column chooser on the "#" corner asks the server for the groups.
 const layout = await source.getLayout({ query: EMPTY_QUERY });
-const meta = layout.meta ?? layout;
-let shape = { layout };
-if (layout.type === 'table') {
-  // A million columns: described by index. Titles come from the server (getLabels); type and filter
-  // repeat every 8 columns. Column groups (the type names) drive the column chooser on the "#" corner.
-  const kinds = meta.columnKinds ?? [];
-  const types = meta.columnTypes ?? [];
-  const filterOf = (k) => (!k ? false : k.kind === 'values' ? { type: 'values', values: k.values } : k.kind);
-  shape = {
-    layout,
-    columnCount: meta.cols,
-    getColumn: (i) => ({ group: types[i % types.length], filter: filterOf(kinds[i % kinds.length]) }),
-    columnChooser: types.length > 0,
-    columnGroups: types,
-  };
-}
+const shape = layout.type === 'table' ? { layout, columnCount: layout.columnCount, columnChooser: true } : { layout };
 
 // Toast for copy results -----------------------------------------------------
 const toast = document.createElement('div');
