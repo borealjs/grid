@@ -105,11 +105,11 @@ resizes columns, selects ranges, copies with ⌘C / Ctrl+C and works from the ke
 Load the module and the stylesheet straight from a CDN:
 
 ```html
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@borealjs/grid-core@0.1.0/src/grid.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@borealjs/grid-core@0.1.1/src/grid.css" />
 <div id="grid" style="height: 400px"></div>
 
 <script type="module">
-  import { createGrid, createArraySource } from 'https://cdn.jsdelivr.net/npm/@borealjs/grid-core@0.1.0/+esm';
+  import { createGrid, createArraySource } from 'https://cdn.jsdelivr.net/npm/@borealjs/grid-core@0.1.1/+esm';
 
   const columns = [{ key: 'name', title: 'Name' }, { key: 'city', title: 'City', filter: 'values' }];
   const rows = [{ name: 'Ada', city: 'London' }, { name: 'Grace', city: 'New York' }];
