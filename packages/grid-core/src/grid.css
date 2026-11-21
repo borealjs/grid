@@ -4,12 +4,13 @@
 .vg {
   --vg-bg: #ffffff;
   --vg-fg: #1d2330;
-  --vg-muted: #6b7280;
+  --vg-muted: #5f6673; /* 5.3:1 on --vg-head; #6b7280 was 4.47:1, under the 4.5:1 minimum */
   --vg-line: #e4e7ec;
   --vg-head: #f5f6f8;
   --vg-zebra: #fafbfc;
   --vg-ph: #e9ecf1;
   --vg-accent: #2563eb;
+  --vg-accent-text: #1d4ed8; /* accent for text on tinted backgrounds: 5.5:1 on --vg-sel-head (#2563eb was 4.27:1) */
   --vg-field: #ffffff;
   --vg-sub2: #f3f6fb;
   --vg-sub1: #eaf0f9;
@@ -38,6 +39,7 @@
     --vg-zebra: #171a20;
     --vg-ph: #262a34;
     --vg-accent: #60a5fa;
+    --vg-accent-text: #60a5fa;
     --vg-field: #1b1e25;
     --vg-sub2: #1a2029;
     --vg-sub1: #1d2531;
@@ -59,6 +61,7 @@
     --vg-zebra: #171a20;
     --vg-ph: #262a34;
     --vg-accent: #60a5fa;
+    --vg-accent-text: #60a5fa;
     --vg-field: #1b1e25;
     --vg-sub2: #1a2029;
     --vg-sub1: #1d2531;
@@ -240,7 +243,7 @@
   border: 2px solid var(--vg-accent);
 }
 .vg:not(:focus-within) .vg-active { border-color: var(--vg-muted); }
-.vg-seg.vg-sel { background: var(--vg-sel-head); color: var(--vg-accent); }
+.vg-seg.vg-sel { background: var(--vg-sel-head); color: var(--vg-accent-text); }
 .vg-corner { cursor: pointer; }
 .vg-colhead .vg-seg:not([data-toggle]), .vg-rowhead .vg-seg:not([data-toggle]) { cursor: default; }
 
@@ -294,6 +297,7 @@
   text-align: center;
   color: var(--vg-muted);
   font-size: 14px;
+  pointer-events: none;
 }
 .vg-empty[hidden] { display: none; }
 
@@ -336,7 +340,7 @@
 /* Expand/collapse targets */
 .vg-seg[data-toggle] { cursor: pointer; }
 .vg-seg[data-toggle]:hover { box-shadow: inset 0 0 0 1px var(--vg-accent); }
-.vg-seg.vg-collapsed { color: var(--vg-accent); }
+.vg-seg.vg-collapsed { color: var(--vg-accent-text); }
 
 .vg-cn {
   position: absolute;
@@ -425,6 +429,8 @@
 
 /* A sort or filter that takes a while: what it is doing, and a way to stop it */
 .vg-work { display: flex; align-items: center; gap: 12px; }
+/* Notices let clicks through, but the working line holds the Cancel button. */
+.vg-work.vg-notice-show { pointer-events: auto; }
 .vg-work button,
 .vg-filter-cancel {
   font: inherit;
@@ -453,6 +459,12 @@
   right: auto;
   width: var(--vg-pin-w, 0);
   box-shadow: 1px 0 0 var(--vg-line), 4px 0 6px -4px rgb(0 0 0 / 0.18);
+}
+/* Right pane: at the body's right edge (or after the last column when they all fit), shadow on its left. */
+.vg-pinbody.vg-pinright, .vg-pinhead.vg-pinright {
+  left: calc(var(--vg-rh-w) + var(--vg-pinr-x, 0px));
+  width: var(--vg-pinr-w, 0);
+  box-shadow: -1px 0 0 var(--vg-line), -4px 0 6px -4px rgb(0 0 0 / 0.18);
 }
 .vg-pinbody[hidden], .vg-pinhead[hidden] { display: none; }
 
@@ -487,6 +499,6 @@
 .vg-check[hidden] { display: none; }
 .vg-cn-check { padding-left: 32px; }
 .vg-row.vg-checked > .vg-cell { background: var(--vg-sel-fill); }
-.vg-seg.vg-checked { color: var(--vg-accent); }
+.vg-seg.vg-checked { color: var(--vg-accent-text); }
 .vg-seg.vg-has-check > .vg-sl { padding-left: 30px; }
 .vg-colhead, .vg-rowhead, .vg-corner { user-select: none; -webkit-user-select: none; }

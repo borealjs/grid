@@ -197,13 +197,14 @@ titles you leave out.
 
 ### Pinned and reordered columns
 
-`pinned: true` keeps a column at the start while the rest scroll sideways. Users can drag column headers to
-another place (Escape cancels); pinned columns stay together at the start.
+`pinned: true` (or `'left'`) keeps a column at the start while the rest scroll sideways; `pinned: 'right'` keeps
+it at the right edge, which suits row actions, a status or a total. Users can drag column headers to another place
+(Escape cancels); pinned columns stay together on their side and are reordered among themselves.
 
 ```js
 createGrid(el, {
   dataSource,
-  columns: [{ key: 'id', pinned: true }, { key: 'name', pinned: true }, { key: 'amount' }, { key: 'actions', reorderable: false }],
+  columns: [{ key: 'id', pinned: true }, { key: 'name', pinned: true }, { key: 'amount' }, { key: 'actions', pinned: 'right', reorderable: false }],
   columnOrder: saved,                                   // keys in display order
   onColumnOrderChange: (order) => localStorage.setItem('order', JSON.stringify(order)),
 });
@@ -211,7 +212,8 @@ createGrid(el, {
 
 `reorderable: false` on the grid turns dragging off; `grid.setColumnOrder(keys)` reorders from code.
 
-Tables with millions of columns (`getColumns` or `getColumn`) work the same: `pinnedColumns: 2` pins the first two, and the
+Tables with millions of columns (`getColumns` or `getColumn`) work the same: `pinnedColumns: 2` pins the first two and
+`pinnedColumnsRight: 1` the last one, and the
 order is kept compactly as single indexes and `[first, last]` runs, e.g. `[[0, 4], 9, [5, 8], [10, 999999]]`, so
 moving a column costs a few entries whatever the width.
 
@@ -645,6 +647,7 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `selectedRows` | `{ checks: RowCheck[] }` | checked rows (applied when it changes) |
 | `columnOrder` | `(string \| number \| [first, last])[]` | column keys in display order (compact runs for `getColumn` tables) |
 | `pinnedColumns` | `number` | columns marked `pinned` | pin this many leading columns |
+| `pinnedColumnsRight` | `number` | columns marked `pinned: 'right'` | pin this many trailing columns to the right edge |
 
 #### Events
 
@@ -674,7 +677,7 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `align` | `'start' \| 'end' \| 'center'` | |
 | `filter` | see [sorting and filtering](#sorting-and-filtering) | |
 | `sortable`, `resizable`, `hidden` | `boolean` | |
-| `pinned` | `boolean` | stays at the start while scrolling sideways |
+| `pinned` | `boolean \| 'left' \| 'right'` | stays at the start (`true`, `'left'`) or the right edge (`'right'`) while scrolling sideways |
 | `reorderable` | `boolean` | `false`: cannot be dragged elsewhere |
 | `group` | `string` | group name for the column chooser |
 | `format` | `(value, ctx) => string` | text shown in the cell |

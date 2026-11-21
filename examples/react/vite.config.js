@@ -17,6 +17,6 @@ export default defineConfig(({ mode }) => ({
       { find: /^@borealjs\/react-grid$/, replacement: pkg('react-grid/src/index.ts') },
     ],
   },
-  server: { port: 5175, proxy: { '/api': 'http://localhost:5174' } },
+  server: { port: 5175, strictPort: true, proxy: { '/api': 'http://localhost:5174' } },
   preview: { port: 4173 },
 }));

@@ -1,5 +1,6 @@
 // Zero-dependency server for the grid demos: the /api protocol (see demo-backend.mjs for the
-// endpoints and data) plus static files for examples/ and packages/. `npm start`, port 5174.
+// endpoints and data) plus static files for examples/ and packages/. `npm start` (or `npm run dev`
+// for everything), port 5174; / opens the start page, examples/index.html.
 // BACKEND=sql serves a DuckDB database instead (sql-backend.mjs; file from DB, default data/grid.duckdb).
 
 import http from 'node:http';
@@ -60,7 +61,7 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
 
 async function serveStatic(pathname, res) {
   if (pathname === '/' || pathname === '/index.html') {
-    res.writeHead(302, { Location: '/examples/vanilla/' });
+    res.writeHead(302, { Location: '/examples/' }); // the start page: links to every demo
     res.end();
     return;
   }

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>grid e2e controlled-server fixture</title>
+  <link rel="stylesheet" href="/packages/grid-core/src/grid.css">
+  <style>body{margin:0} #grid{height:400px;width:800px}</style>
+</head>
+<body>
+  <div id="grid"></div>
+  <script type="module">
+    import { createGrid, createArraySource, createRowSource } from '/packages/grid-core/dist/index.js';
+    // A data source whose latency, failures and timing the test controls through window.__ctl:
+    //   latency (ms), fail (reject every request), held (requests wait until release()), calls (counter).
+    // Rows are served page by page (createRowSource) so scrolling and sorting each cost a request.
+    const qs = new URLSearchParams(location.search);
+    const n = Number(qs.get('rows') ?? 300);
+    const rows = Array.from({ length: n }, (_, i) => ({ id: i, name: `Item ${i}`, city: ['Oslo', 'Lima', 'Pune', 'Rome'][i % 4], amount: (i * 7) % 50 - 10 }));
+    const columns = [
+      { key: 'id', title: 'ID', type: 'number', width: 80 },
+      { key: 'name', title: 'Name', width: 140 },
+      { key: 'city', title: 'City', filter: 'values', width: 120 },
+      { key: 'amount', title: 'Amount', type: 'number', width: 120 },
+    ];
+    const ctl = (window.__ctl = {
+      latency: Number(qs.get('latency') ?? 0), fail: qs.get('fail') === '1', held: false,
+      calls: { rows: 0 }, waiters: [],
+      release() { this.held = false; this.waiters.splice(0).forEach((go) => go()); },
+    });
+    const wait = (signal) => new Promise((resolve, reject) => {
+      const finish = () => (signal?.aborted ? reject(new DOMException('Aborted', 'AbortError')) : resolve());
+      signal?.addEventListener('abort', finish, { once: true });
+      const go = () => (ctl.latency ? setTimeout(finish, ctl.latency) : finish());
+      if (ctl.held) ctl.waiters.push(go); else go();
+    });
+    const base = createArraySource(rows, { columns });
+    const source = createRowSource({
+      columns,
+      pageSize: 50,
+      async getRows({ offset, limit, query, signal }) {
+        ctl.calls.rows++;
+        await wait(signal);
+        if (ctl.fail) throw new Error('server boom');
+        const { rowCount } = await base.getLayout({ query });
+        const count = Math.max(0, Math.min(limit, rowCount - offset));
+        const [cells] = count ? await base.getCells({ rects: [{ row: offset, col: 0, rowCount: count, colCount: 4 }], query }) : [[]];
+        return { rows: cells.map((r) => ({ id: r[0], name: r[1], city: r[2], amount: r[3] })), total: rowCount };
+      },
+    });
+    const events = (window.__events = []);
+    const rec = (type) => (payload, extra) => events.push({ type, payload: JSON.parse(JSON.stringify(payload ?? null)), extra: extra ?? null });
+    try {
+      const grid = (window.__grid = createGrid(document.getElementById('grid'), {
+        dataSource: source, columns, ariaLabel: 'Controlled',
+        onError: rec('error'), onViewChange: rec('view'), onSortChange: rec('sort'), onFilterChange: rec('filter'),
+      }));
+      await grid.ready;
+    } catch (err) {
+      window.__readyError = String(err?.message ?? err);
+    }
+    window.__ready = true;
+  </script>
+</body>
+</html>

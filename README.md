@@ -31,7 +31,7 @@
   plus your own.
 - **Pivots.** Grouped row and column headers, subtotals, expand and collapse.
 - **Spreadsheet feel.** Range selection, copy into Excel or Google Sheets, merged cells, full keyboard support.
-- **App essentials, at any size.** Pinned and drag-to-reorder columns (also with a million columns), row
+- **App essentials, at any size.** Columns pinned left or right and drag-to-reorder columns (also with a million columns), row
   checkboxes that can check 50 million rows in one Shift+click, a selection that stays on its row through sorts
   and filters, cell click, double-click and context-menu events.
 - **Yours to shape.** Custom cells, headers, filters and empty state; theme with CSS variables; dark mode;
@@ -112,26 +112,22 @@ every setting on and off and gives you the code for it, in React or plain JavaSc
 
 The repository also has a [plain JavaScript example](examples/vanilla), with no React, and a
 [playground](examples/playground): load your own CSV or generate millions of rows, drag fields into rows,
-columns and values, set the server latency, and watch requests, timings and frame rate live. It runs at
-http://localhost:5174/examples/playground/ with `npm start`. To run both on your
-machine:
+columns and values, set the server latency, and watch requests, timings and frame rate live. To run all three
+on your machine:
 
 ```bash
 git clone https://github.com/borealjs/grid.git && cd grid && npm install
 ```
 
 ```bash
-npm start
+npm run dev
 ```
 
-```bash
-npm run dev:react
-```
-
-`npm start` runs the demo server and the plain JavaScript example at http://localhost:5174. `npm run dev:react`
-serves the live demo with hot reload at http://localhost:5175; keep `npm start` running for its server tabs.
-`npm run preview:demo` builds the live demo and serves it at http://localhost:4173/grid/, exactly as it is
-published: no server, the demo backend runs in the browser.
+Then open http://localhost:5174, a start page that links the three demos. `npm run dev` runs the reference
+server (its `/api`, the plain JavaScript example and the playground, on port 5174), the React demo with hot
+reload (port 5175), and a watch build of the grid so the other two pages pick up changes when you reload.
+`npm start` runs only the server. `npm run preview:demo` builds the React demo and serves it at
+http://localhost:4173/grid/, exactly as it is published: no server, the demo backend runs in the browser.
 
 ## Links
 

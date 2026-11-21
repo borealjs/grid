@@ -11,6 +11,9 @@
     "prepare": "npm run build",
     "prestart": "npm run build",
     "start": "node server.mjs",
+    "serve": "node server.mjs",
+    "predev": "npm run build",
+    "dev": "node scripts/dev.mjs",
     "prestart:sql": "npm run build",
     "start:sql": "BACKEND=sql node server.mjs",
     "seed:sql": "node scripts/seed-duckdb.mjs",
@@ -22,12 +25,18 @@
     "version-packages": "node scripts/version-packages.mjs",
     "publish-packages": "node scripts/publish-packages.mjs",
     "build:demo": "npm run build && npm run build:pages --workspace examples/react",
-    "preview:demo": "npm run build:demo && npm run preview:pages --workspace examples/react"
+    "preview:demo": "npm run build:demo && npm run preview:pages --workspace examples/react",
+    "test:coverage": "c8 --include=\"packages/grid-core/src/**\" --reporter=text-summary --reporter=html node --import tsx --test test/*.test.mjs",
+    "test:e2e": "npm run build && playwright test"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
     "@duckdb/node-api": "1.5.6-r.2",
+    "@playwright/test": "^1.65.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "c8": "^12.0.0",
+    "fast-check": "^4.10.3",
     "tsdown": "^0.23.7",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3"

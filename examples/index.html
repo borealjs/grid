@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BorealJS Grid demos</title>
+  <style>
+    :root {
+      --bg: #ffffff; --fg: #1d2330; --muted: #5f6673; --line: #e4e7ec; --card: #f8f9fb;
+      --accent: #2563eb; --ok: #15803d; --warn: #b45309;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #14161b; --fg: #e6e8ec; --muted: #9aa3af; --line: #2a2e37; --card: #1b1e25; --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 860px; margin: 0 auto; padding: 40px 16px 56px; }
+    h1 { font-size: 24px; margin: 0 0 4px; }
+    .lead { color: var(--muted); margin: 0 0 28px; }
+    .cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    .card { display: flex; flex-direction: column; gap: 8px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: inherit; text-decoration: none; }
+    a { color: var(--accent); }
+    a.card:hover { border-color: var(--accent); }
+    .card h2 { font-size: 17px; margin: 0; color: var(--accent); }
+    .card p { margin: 0; color: var(--muted); font-size: 14px; flex: 1; }
+    .meta { font-size: 13px; color: var(--muted); }
+    .meta code { font-size: 12px; }
+    .status { font-size: 13px; }
+    .status.ok { color: var(--ok); }
+    .status.off { color: var(--warn); }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: color-mix(in srgb, var(--line) 60%, transparent); padding: 1px 5px; border-radius: 4px; }
+    h3 { font-size: 15px; margin: 36px 0 8px; }
+    table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    th, td { text-align: left; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    td:first-child { white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>BorealJS Grid demos</h1>
+    <p class="lead">Three demos of the same grid. This page and the reference server's <code>/api</code> run on port <span id="port">5174</span>.</p>
+
+    <div class="cards">
+      <a class="card" id="react" href="http://localhost:5175/">
+        <h2>React demo</h2>
+        <p>The main showcase: React cells and filters, a custom backend, a pivot with merged cells, and a billion-row table with an Options panel.</p>
+        <span class="status" id="react-status">Checking…</span>
+        <span class="meta">Port 5175 · hot reload of the TypeScript sources</span>
+      </a>
+      <a class="card" href="vanilla/">
+        <h2>Plain JavaScript example</h2>
+        <p>The grid with no framework, reading pivots and flat tables (up to a million columns) from the reference server.</p>
+        <span class="meta">Uses the built bundle: reload after a rebuild</span>
+      </a>
+      <a class="card" href="playground/">
+        <h2>Playground</h2>
+        <p>Load a CSV or generate millions of rows, drag fields into rows, columns and values, set the latency, and watch timings live.</p>
+        <span class="meta">Its own server in a Web Worker · uses the built bundle</span>
+      </a>
+    </div>
+
+    <h3>Commands</h3>
+    <table>
+      <thead><tr><th>Command</th><th>What it runs</th></tr></thead>
+      <tbody>
+        <tr><td><code>npm run dev</code></td><td>Everything: this server, the React demo, and a watch build of grid-core so the other two pages pick up changes on reload</td></tr>
+        <tr><td><code>npm start</code></td><td>Only this server (the plain JavaScript example and the playground), built once at start</td></tr>
+        <tr><td><code>npm run preview:demo</code></td><td>The React demo as published on GitHub Pages, with <code>/api</code> answered in the browser, at <a href="http://localhost:4173/grid/">localhost:4173/grid/</a></td></tr>
+      </tbody>
+    </table>
+  </main>
+  <script>
+    // Is the React dev server up? An opaque (no-cors) response is enough to tell.
+    const url = `${location.protocol}//${location.hostname}:5175/`;
+    const card = document.getElementById('react');
+    const status = document.getElementById('react-status');
+    card.href = url;
+    if (location.port) document.getElementById('port').textContent = location.port;
+    fetch(url, { mode: 'no-cors', cache: 'no-store' }).then(
+      () => { status.textContent = 'Running'; status.className = 'status ok'; },
+      () => { status.textContent = 'Not running: start it with npm run dev'; status.className = 'status off'; },
+    );
+  </script>
+</body>
+</html>

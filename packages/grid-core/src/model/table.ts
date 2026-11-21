@@ -77,13 +77,18 @@ export function createTableModel(options: ModelOptions, layout: TableLayout, sou
   const columnsLabel = () => o.messages?.columns ?? 'Columns';
 
   // Display order as runs of source columns (works for a million columns: see RunOrder). With a column
-  // list, columns marked `pinned` come first; `pinnedColumns` pins that many leading columns.
-  const pinnedOf = (s: number) => !!list && !!list[s]?.pinned;
+  // list, columns marked `pinned` (or 'left') come first and those marked 'right' last; `pinnedColumns` and
+  // `pinnedColumnsRight` pin that many leading and trailing columns.
+  const sideOf = (s: number): 'left' | 'right' | null => {
+    const p = list?.[s]?.pinned;
+    return p === 'right' ? 'right' : p === true || p === 'left' ? 'left' : null;
+  };
   const withPinnedFirst = (order: RunOrder): RunOrder => {
     if (!list || !list.some((d) => d.pinned)) return order;
     const all: number[] = [];
     order.forEach((s) => all.push(s));
-    return RunOrder.fromList(sourceCount, [...all.filter(pinnedOf), ...all.filter((s) => !pinnedOf(s))]);
+    const on = (side: 'left' | 'right' | null) => all.filter((s) => sideOf(s) === side);
+    return RunOrder.fromList(sourceCount, [...on('left'), ...on(null), ...on('right')]);
   };
   const orderFrom = (spec: GridOptions['columnOrder'] | CompactOrder | number[] | undefined): RunOrder => {
     if (!Array.isArray(spec)) return withPinnedFirst(new RunOrder(sourceCount));
@@ -93,6 +98,7 @@ export function createTableModel(options: ModelOptions, layout: TableLayout, sou
   };
   let order = orderFrom(o.columnOrder);
   let pinned = 0;
+  let pinnedRight = 0;
   let colFilterList: Condition[] = initial.colfilter ? JSON.parse(initial.colfilter) : [];
 
   function buildAxis(colFilters: Condition[]): ColumnsAxis {
@@ -100,6 +106,7 @@ export function createTableModel(options: ModelOptions, layout: TableLayout, sou
     const hidden = list ? list.some((d) => d.hidden) : false;
     if (described) colFilters = []; // the data source applies column filters (columns are renumbered)
     let pinnedShown = 0;
+    let rightShown = 0;
     if (hidden || colFilters.length) {
       // Some columns are not shown: list the visible ones (column lists, or the column chooser).
       const out = new Int32Array(sourceCount);
@@ -108,16 +115,21 @@ export function createTableModel(options: ModelOptions, layout: TableLayout, sou
         const d = defOf(i);
         if (d.hidden) return;
         if (colFilters.length && !colFilters.every((f) => matchesName(f, d.group ?? ''))) return;
-        if (pinnedOf(i)) pinnedShown++;
+        if (sideOf(i) === 'left') pinnedShown++;
+        if (sideOf(i) === 'right') rightShown++;
         out[n++] = i;
       });
       visible = out.slice(0, n);
     } else {
       if (!order.identity) visible = order;
-      if (list) for (let i = 0; i < sourceCount && pinnedOf(order.sourceOf(i)); i++) pinnedShown++;
+      if (list) {
+        for (let i = 0; i < sourceCount && sideOf(order.sourceOf(i)) === 'left'; i++) pinnedShown++;
+        for (let i = sourceCount - 1; i >= 0 && sideOf(order.sourceOf(i)) === 'right'; i--) rightShown++;
+      }
     }
     const axis = widthOf ? new ColumnsAxis(sourceCount, widthOf, visible) : ColumnsAxis.uniform(sourceCount, defaultWidth, visible);
     pinned = Math.min(axis.count, Math.max(0, Math.floor(o.pinnedColumns ?? pinnedShown)));
+    pinnedRight = Math.min(axis.count - pinned, Math.max(0, Math.floor(o.pinnedColumnsRight ?? rightShown)));
     return axis;
   }
 
@@ -300,6 +312,7 @@ export function createTableModel(options: ModelOptions, layout: TableLayout, sou
       }
     },
     pinnedCols: () => pinned,
+    pinnedColsRight: () => pinnedRight,
     columnOrder: () => order.toCompact(),
     setColumnOrder(next) {
       order = orderFrom(next);

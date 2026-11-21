@@ -110,7 +110,8 @@ rest.setRowSelection({ checks: [{ from: 0, to: 49_999_999, query: rest.getQuery(
 const howMany: number | undefined = rest.checkedCount();
 console.log(howMany);
 // Very wide tables: pin leading columns and keep the order compact.
-createGrid(document.body, { dataSource: ds, columnCount: 1_000_000, getColumn: (i) => ({ title: `C${i}` }), pinnedColumns: 2, columnOrder: [[0, 4], 9, [5, 8]] });
+createGrid(document.body, { dataSource: ds, columnCount: 1_000_000, getColumn: (i) => ({ title: `C${i}` }), pinnedColumns: 2, pinnedColumnsRight: 1, columnOrder: [[0, 4], 9, [5, 8]] });
+createGrid(document.body, { dataSource: ds, columns: [{ key: 'id', pinned: 'left' }, { key: 'name' }, { key: 'open', pinned: 'right' }] });
 const checkedRows: RowSelection = rest.getRowSelection();
 console.log(checkedRows, rest.getRow(0), rest.getColumnOrder());
 rest.setColumnOrder(['id', 'n']);

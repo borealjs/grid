@@ -25,7 +25,7 @@ const PASS = [
   'layout', 'rowCount', 'columnCount', 'rowHeight', 'headerHeight', 'columnWidth', 'minColumnWidth',
   'columnChooser', 'columnGroups', 'theme', 'sortable', 'filterable', 'resizable', 'multiSort', 'expandable',
   'selection', 'copy', 'keyboard', 'notices', 'defaultSort', 'defaultFilter', 'defaultColumnFilter', 'blockRows', 'blockCols',
-  'rowHeaderWidths', 'model', 'isMac', 'rowSelection', 'reorderable', 'pinnedColumns',
+  'rowHeaderWidths', 'model', 'isMac', 'rowSelection', 'reorderable', 'pinnedColumns', 'pinnedColumnsRight',
 ] as const satisfies readonly (keyof Props & keyof GridOptions)[];
 /** Object props compared shallowly, so inline objects do not rebuild the grid. */
 const OBJECTS = ['rowHeader', 'messages'] as const satisfies readonly (keyof Props & keyof GridOptions)[];

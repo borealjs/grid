@@ -5,6 +5,8 @@
 // It runs off the main thread, so its compute time is real and measured; network latency is added by
 // the page around each call.
 
+import { parseCsvColumns } from './csv-columns.js';
+
 const SIGMA = -1; // the "Σ Values" pseudo-dimension (measure names as a level of rows or columns)
 const SYN_ROOT = -2; // synthetic "All" level for axes with fewer than two dimensions
 const SYN_LEAF = -3; // synthetic single leaf for an axis with no dimensions
@@ -87,6 +89,8 @@ function datasetInfo() {
   for (const f of ds.fields) {
     if (f.codes) bytes += f.codes.byteLength;
     if (f.values) bytes += f.values.byteLength;
+    if (f.rankReady) bytes += f.rank.byteLength; // computed on first use for CSV text columns (lazyRank)
+    if (f.dict) for (const s of f.dict) bytes += 40 + 2 * s.length; // a JS string: header + UTF-16 text (an estimate)
   }
   return { rows: ds.n, fields: ds.fields.map(fieldInfo), bytes, source: ds.source, buildMs: ds.buildMs };
 }
@@ -243,126 +247,28 @@ function generate({ rows, dims, measures, years = 5, seed = 42 }, id) {
 
 // ------------------------------------------------------------------ CSV
 
-function detectDelimiter(text) {
-  const head = text.slice(0, 20000).split(/\r?\n/).slice(0, 10);
-  let best = ',', bestScore = -1;
-  for (const d of [',', ';', '\t', '|']) {
-    const counts = head.map((l) => l.split(d).length - 1);
-    const min = Math.min(...counts);
-    const score = min > 0 && counts.every((c) => c === counts[0]) ? min * 10 : min;
-    if (score > bestScore) { best = d; bestScore = score; }
-  }
-  return best;
+/**
+ * The sort rank of a text column's values (natural order, case-insensitive) is only needed to sort or pivot
+ * by it, and ranking a dictionary of a million values takes seconds: do it on first use, not at load.
+ */
+function lazyRank(f) {
+  if (f.kind !== 'dim') return f;
+  let rank = null;
+  Object.defineProperty(f, 'rank', { enumerable: true, configurable: true, get() { f.rankReady = true; return (rank ??= rankOf(f.dict, false)); } });
+  f.rankReady = false;
+  return f;
 }
 
-/** RFC 4180 CSV: quoted fields, doubled quotes, newlines inside quotes. Columns are filled as strings. */
-function parseCsv({ text, header = true, delimiter = 'auto', name }, id) {
+/**
+ * A CSV (a File/Blob, streamed, or a string) into typed columns: see csv-columns.js. Numbers become the
+ * smallest exact typed array, text becomes a dictionary plus 16-bit codes, so a large file costs a few bytes
+ * per cell and is never held whole as a string.
+ */
+async function parseCsv({ file, text, header = true, delimiter = 'auto', name }, id) {
   const t0 = performance.now();
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  const d = delimiter === 'auto' ? detectDelimiter(text) : delimiter === 'tab' ? '\t' : delimiter;
-  const D = d.charCodeAt(0);
-  const len = text.length;
-  const cols = [];
-  let row = 0, col = 0, i = 0;
-  let headerNames = null;
-  let rowVals = [];
-  const pushVal = (v) => { rowVals.push(v); };
-  const endRow = () => {
-    if (rowVals.length === 1 && rowVals[0] === '') { rowVals = []; return; } // blank line
-    if (header && !headerNames) {
-      headerNames = rowVals;
-    } else {
-      const width = Math.max(rowVals.length, cols.length);
-      for (let c = 0; c < width; c++) {
-        if (!cols[c]) { cols[c] = new Array(row); for (let r = 0; r < row; r++) cols[c][r] = ''; }
-        cols[c].push(rowVals[c] ?? '');
-      }
-      row++;
-      if ((row & 0xffff) === 0) progress(id, 'Parsing CSV', i, len);
-    }
-    rowVals = [];
-  };
-  while (i < len) {
-    let ch = text.charCodeAt(i);
-    if (ch === 34) { // quoted
-      let j = i + 1, out = '';
-      for (;;) {
-        const q = text.indexOf('"', j);
-        if (q < 0) { out += text.slice(j); i = len; break; }
-        out += text.slice(j, q);
-        if (text.charCodeAt(q + 1) === 34) { out += '"'; j = q + 2; continue; }
-        i = q + 1;
-        break;
-      }
-      pushVal(out);
-      ch = text.charCodeAt(i);
-      if (ch === D) i++;
-      else if (ch === 13) { i += text.charCodeAt(i + 1) === 10 ? 2 : 1; endRow(); }
-      else if (ch === 10) { i++; endRow(); }
-      else if (i >= len) endRow();
-      continue;
-    }
-    // unquoted: up to the next delimiter or newline
-    let j = i;
-    while (j < len) {
-      const c = text.charCodeAt(j);
-      if (c === D || c === 10 || c === 13) break;
-      j++;
-    }
-    pushVal(text.slice(i, j).trim());
-    if (j >= len) { i = len; endRow(); break; }
-    const c = text.charCodeAt(j);
-    if (c === D) { i = j + 1; if (i >= len) { pushVal(''); endRow(); } }
-    else if (c === 13) { i = j + (text.charCodeAt(j + 1) === 10 ? 2 : 1); endRow(); }
-    else { i = j + 1; endRow(); }
-  }
-  if (rowVals.length) endRow();
-  col = cols.length;
-  if (!col || !row) throw new Error('The CSV has no data rows');
-
-  progress(id, 'Detecting column types', 0, col);
-  const fields = [];
-  const used = new Set();
-  for (let c = 0; c < col; c++) {
-    const raw = cols[c];
-    let title = (headerNames?.[c] ?? '').trim() || `Column ${c + 1}`;
-    while (used.has(title)) title += ' ·';
-    used.add(title);
-    let nonEmpty = 0, numeric = 0;
-    const sample = Math.min(raw.length, 50000);
-    const step = Math.max(1, Math.floor(raw.length / sample));
-    for (let r = 0; r < raw.length; r += step) {
-      const v = raw[r];
-      if (v === '') continue;
-      nonEmpty++;
-      const num = Number(v.replace(/^\$|,(?=\d{3}\b)/g, ''));
-      if (v !== '' && Number.isFinite(num)) numeric++;
-    }
-    const isNum = nonEmpty > 0 && numeric / nonEmpty >= 0.98;
-    if (isNum) {
-      const values = new Float64Array(row);
-      for (let r = 0; r < row; r++) {
-        const v = raw[r];
-        values[r] = v === '' ? NaN : Number(v.replace(/^\$|,(?=\d{3}\b)/g, ''));
-      }
-      fields.push({ key: `f${c}`, name: title, kind: 'num', values });
-    } else {
-      const map = new Map();
-      const dict = [];
-      const tmp = new Uint32Array(row);
-      for (let r = 0; r < row; r++) {
-        const v = raw[r] === '' ? '(blank)' : raw[r];
-        let code = map.get(v);
-        if (code === undefined) { code = dict.length; map.set(v, code); dict.push(v); }
-        tmp[r] = code;
-      }
-      const codes = dict.length < 65536 ? Uint16Array.from(tmp) : tmp;
-      fields.push({ key: `f${c}`, name: title, kind: 'dim', codes, dict, rank: rankOf(dict, false) });
-    }
-    cols[c] = null;
-    progress(id, 'Detecting column types', c + 1, col);
-  }
-  ds = { n: row, fields, source: { type: 'csv', name, delimiter: d === '\t' ? 'tab' : d }, buildMs: performance.now() - t0 };
+  const r = await parseCsvColumns({ file, text, header, delimiter, onProgress: (p) => progress(id, p.phase, p.done, p.total) });
+  const fields = r.fields.map(lazyRank);
+  ds = { n: r.n, fields, source: { type: 'csv', name, delimiter: r.delimiter === '\t' ? 'tab' : r.delimiter }, buildMs: performance.now() - t0 };
   resetCaches();
   return datasetInfo();
 }

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>grid e2e fixture</title>
+  <link rel="stylesheet" href="/packages/grid-core/src/grid.css">
+  <style>body{margin:0} #grid{height:400px;width:800px}</style>
+</head>
+<body>
+  <div id="grid"></div>
+  <script type="module">
+    import { createGrid, createArraySource } from '/packages/grid-core/dist/index.js';
+    // Deterministic data: row i has id i, name "Item i", city cycling over 4 values, amount (i * 7) % 50 - 10.
+    const CITIES = ['Oslo', 'Lima', 'Pune', 'Rome'];
+    // Query params: rows=N, pin=K (pin K leading columns), pinr=K (pin K trailing columns to the right), checks=1 (row checkboxes), wide=1 (extra columns to scroll sideways).
+    const qs = new URLSearchParams(location.search);
+    const n = Number(qs.get('rows') ?? 200);
+    const extra = qs.get('wide') ? 20 : 0;
+    const rows = Array.from({ length: n }, (_, i) => {
+      const r = { id: i, name: `Item ${i}`, city: CITIES[i % 4], amount: (i * 7) % 50 - 10 };
+      for (let k = 0; k < extra; k++) r[`x${k}`] = `x${k}-${i}`;
+      return r;
+    });
+    const columns = [
+      { key: 'id', title: 'ID', type: 'number', width: 80 },
+      { key: 'name', title: 'Name', width: 140 },
+      { key: 'city', title: 'City', filter: 'values', width: 120 },
+      { key: 'amount', title: 'Amount', type: 'number', width: 120 },
+      ...Array.from({ length: extra }, (_, k) => ({ key: `x${k}`, title: `X${k}`, width: 120 })),
+    ];
+    // Every callback is recorded so tests can assert on what the host app would see.
+    const events = (window.__events = []);
+    const rec = (type) => (payload) => events.push({ type, payload: JSON.parse(JSON.stringify(payload ?? null)) });
+    const grid = (window.__grid = createGrid(document.getElementById('grid'), {
+      dataSource: createArraySource(rows, { columns }),
+      columns,
+      ariaLabel: 'Fixture',
+      getRowId: (row) => row.id,
+      rowSelection: qs.get('checks') === '1',
+      ...(qs.get('reorder') === '0' ? { reorderable: false } : {}),
+      ...(qs.get('sortable') === '0' ? { sortable: false } : {}), // sortable=0: header clicks select columns instead of sorting
+      ...(qs.get('pin') ? { pinnedColumns: Number(qs.get('pin')) } : {}),
+      ...(qs.get('pinr') ? { pinnedColumnsRight: Number(qs.get('pinr')) } : {}), // pinr=K: pin K trailing columns to the right
+      onSortChange: rec('sort'),
+      onFilterChange: rec('filter'),
+      onSelectionChange: rec('selection'),
+      onCopy: rec('copy'),
+      onColumnResize: rec('resize'),
+      onColumnOrderChange: rec('order'),
+      onRowSelectionChange: rec('rowSelection'),
+      onCellClick: (e) => events.push({ type: 'cellClick', payload: { row: e.row, column: e.column, value: e.value } }),
+    }));
+    await grid.ready;
+    // merges=1: a 2x2 merge at rows 1-2, columns 1-2 (labelled), and a tall one-column merge in the city column.
+    // merges=<json array> sets those merges; merges=1 uses a small default set.
+    const mq = qs.get('merges');
+    if (mq) grid.setMerges(mq.startsWith('[') ? JSON.parse(mq) : [{ r0: 1, c0: 1, nr: 2, nc: 2, label: 'MERGED' }, { r0: 5, c0: 3, nr: 4, nc: 1 }]);
+    window.__ready = true;
+  </script>
+</body>
+</html>

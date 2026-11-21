@@ -133,21 +133,22 @@ const [term, setTerm] = useState('');
 
 ### Pinned and reordered columns
 
-`pinned` keeps a column at the start while the rest scroll sideways. Users can drag column headers to another
-place (Escape cancels); pinned columns stay together at the start.
+`pinned` keeps a column at the start while the rest scroll sideways; `pinned="right"` keeps it at the right
+edge, which suits row actions, a status or a total. Users can drag column headers to another place (Escape
+cancels); pinned columns stay together on their side and are reordered among themselves.
 
 ```jsx
 <VirtualGrid rows={rows} onColumnOrderChange={(order) => save('order', order)} columnOrder={savedOrder}>
   <Column field="id" title="ID" pinned />
   <Column field="name" title="Customer" pinned />
   <Column field="amount" title="Amount" type="number" />
-  <Column field="actions" title="" reorderable={false} />
+  <Column field="actions" title="" pinned="right" reorderable={false} />
 </VirtualGrid>
 ```
 
 `onColumnOrderChange` gets the fields in their new order; pass them back as `columnOrder` to restore it.
 `reorderable={false}` on the grid turns dragging off. With millions of columns, `pinnedColumns={2}`
-pins the first two, and the order is compact: single indexes and `[first, last]` runs such as
+pins the first two and `pinnedColumnsRight={1}` the last one, and the order is compact: single indexes and `[first, last]` runs such as
 `[[0, 4], 9, [5, 8], [10, 999999]]`.
 
 ## Custom cells
@@ -715,6 +716,7 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 | `columnChooser` | `boolean` | on when columns have a `group` | a corner menu to show and hide column groups |
 | `rowSelection` | `boolean` | `false` | [row checkboxes](#row-checkboxes) |
 | `pinnedColumns` | `number` | columns marked `pinned` | pin this many leading columns |
+| `pinnedColumnsRight` | `number` | columns marked `pinned="right"` | pin this many trailing columns to the right edge |
 | `reorderable` | `boolean` | `true` | drag column headers to reorder |
 
 #### Look
@@ -775,7 +777,7 @@ The same props work in a `columns` array.
 | `align` | `'start' \| 'end' \| 'center'` | |
 | `filter` | see [sorting and filtering](#sorting-and-filtering) | |
 | `sortable`, `resizable`, `hidden` | `boolean` | |
-| `pinned` | `boolean` | stays at the start while scrolling sideways |
+| `pinned` | `boolean \| 'left' \| 'right'` | stays at the start (`true`, `'left'`) or the right edge (`'right'`) while scrolling sideways |
 | `reorderable` | `boolean` | `false`: cannot be dragged elsewhere |
 | `group` | `string` | group name for the column chooser |
 | `format` | `(value, ctx) => string` | text shown in the cell |

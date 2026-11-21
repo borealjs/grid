@@ -193,6 +193,37 @@ interface CellSlot {
   selected: boolean | undefined;
 }
 
+/**
+ * A band of pinned columns drawn at a fixed x: the leading columns on the left, the trailing ones on the
+ * right. It has its own cells, merged cells, selection and header, and scrolls only vertically.
+ */
+interface PinPane {
+  right: boolean;
+  body: HTMLDivElement;
+  layer: HTMLDivElement;
+  mergeEl: HTMLDivElement;
+  merges: MergeLayer;
+  selEl: HTMLDivElement;
+  sel: SelectionLayer;
+  head: HTMLDivElement;
+  headLayer: HTMLDivElement;
+  spans: SpanLayer;
+  slots: RowSlot[];
+  /** Columns in the pane, and the first one's visible index (0 on the left, count - n on the right). */
+  count: number;
+  first: number;
+  /** cols.offsetOf(first): a column's x in the pane is its offset minus this. */
+  base: number;
+  /** Width, and (right pane) x in the body where the pane starts, as last drawn. */
+  w: number;
+  x: number;
+  sig: string;
+  /** The pane's columns' sources and exactness, and its N × count coverage by merged cells. */
+  src: Float64Array;
+  exact: Uint8Array;
+  cover: Uint8Array;
+}
+
 interface RowSlot {
   el: HTMLDivElement;
   cells: CellSlot[];
@@ -335,18 +366,9 @@ export class GridEngine {
   rowHeadLayer!: HTMLDivElement;
   colHead!: HTMLDivElement;
   colHeadLayer!: HTMLDivElement;
-  /** Pinned columns: their own body and header, which scroll only vertically. */
-  pinBody!: HTMLDivElement;
-  pinLayer!: HTMLDivElement;
-  pinSelEl!: HTMLDivElement;
-  pinSel!: SelectionLayer;
-  pinHead!: HTMLDivElement;
-  pinHeadLayer!: HTMLDivElement;
-  pinSpans!: SpanLayer;
-  pinSlots: RowSlot[] = [];
-  /** Pinned column count and width (px) as last drawn. */
-  pinCount = 0;
-  pinW = 0;
+  /** Pinned columns: the leading ones in the left pane, the trailing ones in the right pane. */
+  pinL!: PinPane;
+  pinR!: PinPane;
   corner!: HTMLDivElement;
   emptyEl!: HTMLDivElement;
   rowSpans!: SpanLayer;
@@ -383,11 +405,12 @@ export class GridEngine {
   #rowSrc = new Float64Array(0);
   #rowExact = new Uint8Array(0);
   #cover = new Uint8Array(0);
+  /** Window columns with the pinned ones marked not exact, so the body's merged cells start after them. */
+  #bodyExact = new Uint8Array(0);
   #kinds: string[] = [];
   #infos: (ColumnInfo | null)[] = [];
   /** Merges whose top-left cell is not loaded yet ("rs:cs"). */
   #mergeAnchors = new Set<string>();
-  #pinSig = '';
   /** Column descriptions arrived: redraw every cell once they are stored. */
   #describedPending = false;
   /** Source columns the user resized (widths from descriptions do not replace them). */
@@ -630,10 +653,10 @@ export class GridEngine {
 
   /** Redraw every cell and header (after format / render functions changed). The data stays. */
   repaint(): void {
-    for (const slot of [...this.rowSlots, ...this.pinSlots]) for (const cell of slot.cells) cell.c = -1;
+    for (const slot of this.#allSlots()) for (const cell of slot.cells) cell.c = -1;
     this.colSpans.resetCustom();
     this.rowSpans.resetCustom();
-    this.pinSpans.resetCustom();
+    for (const pane of this.#panes()) pane.spans.resetCustom();
     this.anchorCol = null;
     this.rendered.vx = NaN;
     this.invalidate();
@@ -1057,9 +1080,9 @@ export class GridEngine {
 
   destroy(): void {
     this.#endWork();
-    for (const slot of [...this.rowSlots, ...this.pinSlots]) for (const cell of slot.cells) if (cell.cleanup !== undefined) this.#runCleanup(cell);
+    for (const slot of this.#allSlots()) for (const cell of slot.cells) if (cell.cleanup !== undefined) this.#runCleanup(cell);
     this.colSpans.destroy();
-    this.pinSpans.destroy();
+    for (const pane of this.#panes()) pane.spans.destroy();
     this.rowSpans.destroy();
     this.emptyCleanup?.();
     this.#ro.disconnect();
@@ -1073,12 +1096,12 @@ export class GridEngine {
     this.scroller.removeEventListener('scroll', this.#onScroll);
     this.scroller.removeEventListener('wheel', this.#onWheel);
     this.scroller.removeEventListener('keydown', this.#onKeyDown);
-    for (const head of [this.colHead, this.pinHead]) {
+    for (const head of [this.colHead, this.pinL.head, this.pinR.head]) {
       head.removeEventListener('pointerdown', this.#onHeadPointerDown);
       head.removeEventListener('click', this.#onHeadClick);
     }
     this.rowHead.removeEventListener('click', this.#onHeadClick);
-    for (const body of [this.body, this.pinBody]) {
+    for (const body of [this.body, this.pinL.body, this.pinR.body]) {
       body.removeEventListener('pointerdown', this.#onBodyPointerDown);
       body.removeEventListener('click', this.#onBodyClick);
       body.removeEventListener('dblclick', this.#onBodyDblClick);
@@ -1116,22 +1139,31 @@ export class GridEngine {
     this.selLayerEl = div('vg-layer vg-sel-layer', this.body);
     this.selLayer = new SelectionLayer(this.selLayerEl);
     // Drawn after the body and the column headers, so they cover the columns scrolled beneath them.
-    this.pinBody = div('vg-body vg-pinbody', this.viewport);
-    this.pinBody.hidden = true;
-    this.pinLayer = div('vg-layer', this.pinBody);
-    this.pinSelEl = div('vg-layer vg-sel-layer', this.pinBody);
-    this.pinSel = new SelectionLayer(this.pinSelEl);
+    this.pinL = this.#pinPane(false);
+    this.pinR = this.#pinPane(true);
     this.rowHead = div('vg-rowhead', this.viewport);
     this.rowHeadLayer = div('vg-layer', this.rowHead);
     this.colHead = div('vg-colhead', this.viewport);
     this.colHeadLayer = div('vg-layer', this.colHead);
-    this.pinHead = div('vg-colhead vg-pinhead', this.viewport);
-    this.pinHead.hidden = true;
-    this.pinHeadLayer = div('vg-layer', this.pinHead);
+    for (const pane of this.#panes()) {
+      pane.head = div(`vg-colhead vg-pinhead${pane.right ? ' vg-pinright' : ''}`, this.viewport);
+      pane.head.hidden = true;
+      pane.headLayer = div('vg-layer', pane.head);
+    }
+    // Headers are absolutely positioned spans, not a table: each header layer is one ARIA row (a header's
+    // required parent), so the grid's children are all rows.
+    this.rowHeadLayer.setAttribute('role', 'row');
+    this.colHeadLayer.setAttribute('role', 'row');
+    this.colHeadLayer.setAttribute('aria-rowindex', '1');
+    for (const pane of this.#panes()) {
+      pane.headLayer.setAttribute('role', 'row');
+      pane.headLayer.setAttribute('aria-rowindex', '1');
+    }
     this.corner = div('vg-corner', this.viewport);
-    this.emptyEl = div('vg-empty', this.viewport);
+    this.emptyEl = div('vg-empty', host); // outside the grid element: only rows are allowed inside it
     this.emptyEl.hidden = true;
-    this.emptyEl.setAttribute('role', 'status');
+    // A live region, not role=status: a status is not an allowed child of a grid.
+    this.emptyEl.setAttribute('aria-live', 'polite');
     this.#emptySig = '';
     this.#notices = new Notices(host, () => this.o.notices !== false, this.msg.cancel, () => this.cancelView());
     this.rowSpans = new SpanLayer(this.rowHeadLayer, true, false, false, 'rows');
@@ -1139,20 +1171,27 @@ export class GridEngine {
     this.rowSpans.renderHeader = (el, ctx) => this.o.renderHeader?.(el, ctx);
     this.colSpans.renderHeader = (el, ctx) => this.o.renderHeader?.(el, ctx);
     this.rowSpans.checkLabel = this.msg.selectRow;
-    this.pinSpans = new SpanLayer(this.pinHeadLayer, false, true, true, 'cols');
-    this.pinSpans.renderHeader = (el, ctx) => this.o.renderHeader?.(el, ctx);
-    this.rowSpans.hasRenderer = this.colSpans.hasRenderer = this.pinSpans.hasRenderer = () => typeof this.o.renderHeader === 'function';
+    const hasRenderer = () => typeof this.o.renderHeader === 'function';
+    this.rowSpans.hasRenderer = this.colSpans.hasRenderer = hasRenderer;
+    for (const pane of this.#panes()) {
+      pane.spans = new SpanLayer(pane.headLayer, false, true, true, 'cols');
+      pane.spans.renderHeader = (el, ctx) => this.o.renderHeader?.(el, ctx);
+      pane.spans.hasRenderer = hasRenderer;
+    }
     this.#buildCorner();
+    // The corner (dimension names, select-all checkbox) is one header row.
+    this.corner.setAttribute('role', 'row');
+    for (const cn of this.corner.children) if (!cn.hasAttribute('role')) cn.setAttribute('role', 'columnheader');
 
     this.scroller.addEventListener('scroll', this.#onScroll, { passive: true });
     this.scroller.addEventListener('wheel', this.#onWheel, { passive: false });
     this.scroller.addEventListener('keydown', this.#onKeyDown);
-    for (const head of [this.colHead, this.pinHead]) {
+    for (const head of [this.colHead, this.pinL.head, this.pinR.head]) {
       head.addEventListener('pointerdown', this.#onHeadPointerDown);
       head.addEventListener('click', this.#onHeadClick);
     }
     this.rowHead.addEventListener('click', this.#onHeadClick);
-    for (const body of [this.body, this.pinBody]) {
+    for (const body of [this.body, this.pinL.body, this.pinR.body]) {
       body.addEventListener('pointerdown', this.#onBodyPointerDown);
       body.addEventListener('click', this.#onBodyClick);
       body.addEventListener('dblclick', this.#onBodyDblClick);
@@ -1265,6 +1304,7 @@ export class GridEngine {
     this.#ws = new Float64Array(M);
     this.#colSrc = new Float64Array(M);
     this.#colExact = new Uint8Array(M);
+    this.#bodyExact = new Uint8Array(M);
     this.#rowSrc = new Float64Array(N);
     this.#rowExact = new Uint8Array(N);
     this.#cover = new Uint8Array(N * M);
@@ -1298,35 +1338,78 @@ export class GridEngine {
     this.#ensurePinPool(true);
   }
 
-  /** Cells of the pinned columns: N rows × (pinned count) cells, rebuilt when either changes. */
+  /** A pinned pane's elements (the header is added after the column header, so it is drawn over it). */
+  #pinPane(right: boolean): PinPane {
+    const body = div(`vg-body vg-pinbody${right ? ' vg-pinright' : ''}`, this.viewport);
+    body.hidden = true;
+    const layer = div('vg-layer', body);
+    const mergeEl = div('vg-layer vg-merges', body);
+    const selEl = div('vg-layer vg-sel-layer', body);
+    return {
+      right, body, layer, mergeEl, merges: new MergeLayer(mergeEl), selEl, sel: new SelectionLayer(selEl),
+      head: body, headLayer: body, spans: null as unknown as SpanLayer, slots: [], count: 0, first: 0, base: 0, w: 0, x: 0, sig: '',
+      src: new Float64Array(0), exact: new Uint8Array(0), cover: new Uint8Array(0),
+    };
+  }
+
+  #panes(): [PinPane, PinPane] {
+    return [this.pinL, this.pinR];
+  }
+
+  #allSlots(): RowSlot[] {
+    return [...this.rowSlots, ...this.pinL.slots, ...this.pinR.slots];
+  }
+
+  /** The pinned pane showing visible column c, if any. */
+  #paneOf(c: number): PinPane | null {
+    if (c < this.pinL.count) return this.pinL;
+    if (this.pinR.count && c >= this.pinR.first) return this.pinR;
+    return null;
+  }
+
+  /** Columns scrolling between the panes: [first, last]. */
+  #middle(): [number, number] {
+    return [this.pinL.count, this.cols.count - this.pinR.count - 1];
+  }
+
+  /** Pinned panes' cells: N rows × (pinned count) cells each, rebuilt when either changes. */
   #ensurePinPool(force = false): void {
-    const P = Math.min(this.model.pinnedCols?.() ?? 0, this.cols.count);
-    if (!force && P === this.pinCount && this.pinSlots.length === this.N) return;
-    for (const slot of this.pinSlots) for (const cell of slot.cells) if (cell.cleanup !== undefined) this.#clearCustom(cell);
-    this.pinCount = P;
-    this.#pinSig = '';
-    this.pinSlots = [];
-    const frag = document.createDocumentFragment();
-    if (P > 0) {
-      for (let i = 0; i < this.N; i++) {
-        const el = div('vg-row');
-        el.setAttribute('role', 'row');
-        const cells: CellSlot[] = [];
-        for (let j = 0; j < P; j++) {
-          const cellEl = div('vg-cell', el);
-          cellEl.setAttribute('role', 'gridcell');
-          cells.push({
-            el: cellEl, text: cellEl.appendChild(document.createTextNode('')), box: null, cleanup: undefined, extra: '', c: -1,
-            base: 'vg-cell', cls: 'vg-cell', filled: false, ph: false, covered: 0, selected: undefined,
-          });
+    const n = this.cols.count;
+    const L = Math.min(this.model.pinnedCols?.() ?? 0, n);
+    const R = Math.min(this.model.pinnedColsRight?.() ?? 0, n - L);
+    for (const pane of this.#panes()) {
+      const P = pane.right ? R : L;
+      pane.first = pane.right ? n - R : 0;
+      if (!force && P === pane.count && pane.slots.length === this.N) continue;
+      for (const slot of pane.slots) for (const cell of slot.cells) if (cell.cleanup !== undefined) this.#clearCustom(cell);
+      pane.count = P;
+      pane.sig = '';
+      pane.slots = [];
+      pane.src = new Float64Array(P);
+      pane.exact = new Uint8Array(P);
+      pane.cover = new Uint8Array(this.N * P);
+      const frag = document.createDocumentFragment();
+      if (P > 0) {
+        for (let i = 0; i < this.N; i++) {
+          const el = div('vg-row');
+          el.setAttribute('role', 'row');
+          const cells: CellSlot[] = [];
+          for (let j = 0; j < P; j++) {
+            const cellEl = div('vg-cell', el);
+            cellEl.setAttribute('role', 'gridcell');
+            cells.push({
+              el: cellEl, text: cellEl.appendChild(document.createTextNode('')), box: null, cleanup: undefined, extra: '', c: -1,
+              base: 'vg-cell', cls: 'vg-cell', filled: false, ph: false, covered: 0, selected: undefined,
+            });
+          }
+          frag.appendChild(el);
+          pane.slots.push({ el, cells, r: -1, h: NaN, cls: 'vg-row' });
         }
-        frag.appendChild(el);
-        this.pinSlots.push({ el, cells, r: -1, h: NaN, cls: 'vg-row' });
       }
+      pane.layer.replaceChildren(frag);
+      pane.body.hidden = P === 0;
+      pane.head.hidden = P === 0;
     }
-    this.pinLayer.replaceChildren(frag);
-    this.pinBody.hidden = P === 0;
-    this.pinHead.hidden = P === 0;
   }
 
   // ---------------------------------------------------------------- input
@@ -1468,14 +1551,29 @@ export class GridEngine {
     const lx = clamp(x - rect.left, 0, Math.max(0, this.bodyW - 1));
     const py = clamp(y - rect.top, 0, Math.max(0, this.bodyH - 1)) + this.vy;
     // Over the pinned columns: they do not scroll sideways.
+    const { pinL: L, pinR: R } = this;
     const pin = this.#pinWidth();
-    const c = lx < pin ? Math.min(this.cols.indexAt(lx), this.pinCount - 1) : this.cols.indexAt(lx + this.vx);
+    let c: number;
+    if (lx < pin) c = Math.min(this.cols.indexAt(lx), L.count - 1);
+    else if (R.count && lx >= this.#rightX()) c = clamp(this.cols.indexAt(lx - this.#rightX() + this.cols.offsetOf(R.first)), R.first, this.cols.count - 1);
+    else c = this.cols.indexAt(lx + this.vx);
     return { r: this.rows.indexAt(py), c };
   }
 
-  /** Width of the pinned columns (0 without any). */
+  /** Width of the left pinned columns (0 without any). */
   #pinWidth(): number {
-    return this.pinCount ? this.cols.offsetOf(this.pinCount) : 0;
+    return this.pinL.count ? this.cols.offsetOf(this.pinL.count) : 0;
+  }
+
+  /** Width of the right pinned columns (0 without any). */
+  #pinWidthRight(): number {
+    const R = this.pinR;
+    return R.count ? this.cols.total - this.cols.offsetOf(R.first) : 0;
+  }
+
+  /** Body x where the right pane starts: at the right edge, or after the last column when they all fit. */
+  #rightX(): number {
+    return Math.max(this.#pinWidth(), Math.min(this.bodyW, this.cols.total) - this.#pinWidthRight());
   }
 
   // ---------------------------------------------------------------- cell events
@@ -1783,9 +1881,10 @@ export class GridEngine {
     const { model } = this;
     if (!model.moveColumn) return;
     const n = this.cols.count;
-    const P = this.pinCount;
     if (from < 0 || from >= n) return;
-    to = from < P ? clamp(to, 0, P - 1) : clamp(to, P, n - 1);
+    const pane = this.#paneOf(from);
+    const [m0, m1] = this.#middle();
+    to = pane ? clamp(to, pane.first, pane.first + pane.count - 1) : clamp(to, m0, m1);
     if (to === from) return;
     const activeSrc = this.colSource(this.sel.active.c);
     model.moveColumn(from, to);
@@ -1961,21 +2060,28 @@ export class GridEngine {
       const rect = this.body.getBoundingClientRect();
       const lx = clamp(clientX - rect.left, 0, Math.max(0, this.bodyW - 1));
       const pin = this.#pinWidth();
-      const P = this.pinCount;
-      const px = from < P ? Math.min(lx, pin - 1) : Math.max(lx, pin) + this.vx;
+      const rx = this.#rightX();
+      const pane = this.#paneOf(from);
+      const rbase = this.cols.offsetOf(this.pinR.first);
+      // Pinned columns move within their pane, the others between the panes.
+      const px = pane === this.pinL ? Math.min(lx, pin - 1) : pane ? Math.max(lx, rx) - rx + rbase : clamp(lx, pin, Math.max(pin, rx - 1)) + this.vx;
       const c = this.cols.indexAt(px);
       const mid = this.cols.offsetOf(c) + this.cols.sizeOf(c) / 2;
       let slot = px > mid ? c + 1 : c; // insert before `slot`
-      slot = from < P ? clamp(slot, 0, P) : clamp(slot, P, this.cols.count);
+      const [m0, m1] = this.#middle();
+      slot = pane ? clamp(slot, pane.first, pane.first + pane.count) : clamp(slot, m0, m1 + 1);
       // Line position (viewport x) at the boundary before `slot`.
       const edge = this.cols.offsetOf(slot);
-      const x = this.rowHeaderWidth + (from < P ? edge : Math.max(edge - this.vx, pin));
+      const x = this.rowHeaderWidth + (pane === this.pinL ? edge : pane ? rx + edge - rbase : clamp(edge - this.vx, pin, rx));
       if (line) line.style.transform = `translate3d(${x - 1}px,0,0)`;
       return slot > from ? slot - 1 : slot;
     };
     const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== e.pointerId) return;
       if (!line) {
         if (Math.abs(ev.clientX - startX) < 6) return;
+        // Capture only once it is a drag: capturing on press would send a plain click to the header container.
+        if (head.isConnected) head.setPointerCapture(e.pointerId);
         line = div('vg-dropline', this.viewport);
         seg.classList.add('vg-dragging');
         this.host.classList.add('vg-moving');
@@ -1983,9 +2089,9 @@ export class GridEngine {
       to = target(ev.clientX);
     };
     const finish = (apply: boolean) => {
-      head.removeEventListener('pointermove', move);
-      head.removeEventListener('pointerup', up);
-      head.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
       window.removeEventListener('keydown', key, true);
       if (!line) return;
       line.remove();
@@ -1996,18 +2102,17 @@ export class GridEngine {
       setTimeout(() => { this.#suppressHeadClick = false; }, 0);
       if (apply && to !== from) this.moveColumn(from, to);
     };
-    const up = () => finish(true);
-    const cancel = () => finish(false);
+    const up = (ev: PointerEvent) => { if (ev.pointerId === e.pointerId) finish(true); };
+    const cancel = (ev: PointerEvent) => { if (ev.pointerId === e.pointerId) finish(false); };
     const key = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') {
         ev.stopPropagation();
         finish(false);
       }
     };
-    head.setPointerCapture(e.pointerId);
-    head.addEventListener('pointermove', move);
-    head.addEventListener('pointerup', up);
-    head.addEventListener('pointercancel', cancel);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
     window.addEventListener('keydown', key, true);
   }
 
@@ -2129,10 +2234,11 @@ export class GridEngine {
     if (top < y || bottom - top > this.bodyH) y = top;
     else if (bottom > y + this.bodyH) y = bottom - this.bodyH;
     // Pinned columns are always in view; other columns must not end up beneath them.
-    const pin = this.#pinWidth();
-    if (c >= this.pinCount) {
-      if (left - pin < x || right - left > this.bodyW - pin) x = left - pin;
-      else if (right > x + this.bodyW) x = right - this.bodyW;
+    if (!this.#paneOf(c)) {
+      const pin = this.#pinWidth();
+      const end = this.bodyW - this.#pinWidthRight(); // the right pane starts here when scrolled
+      if (left - pin < x || right - left > end - pin) x = left - pin;
+      else if (right > x + end) x = right - end;
     }
     if (x !== this.vx || y !== this.vy) this.scrollToVirtual(x, y);
   }
@@ -2147,12 +2253,29 @@ export class GridEngine {
       if (dc) c = dc < 0 ? 0 : this.cols.count - 1;
     } else {
       // Step off the far edge of a merged cell, not just to the next cell inside it.
-      if (dr > 0) r = (p ? p.vr1 : r) + 1;
-      else if (dr < 0) r = (p ? p.vr0 : r) - 1;
-      if (dc > 0) c = (p ? p.vc1 : c) + 1;
-      else if (dc < 0) c = (p ? p.vc0 : c) - 1;
+      if (dr > 0) r = (p ? this.#farEdge(p, 'rows', 1) : r) + 1;
+      else if (dr < 0) r = (p ? this.#farEdge(p, 'rows', -1) : r) - 1;
+      if (dc > 0) c = (p ? this.#farEdge(p, 'cols', 1) : c) + 1;
+      else if (dc < 0) c = (p ? this.#farEdge(p, 'cols', -1) : c) - 1;
     }
     this.#goTo({ r, c }, extend);
+  }
+
+  /**
+   * A merged cell's far edge (visible index) in one direction. Its piece is clipped to the drawn rows and
+   * columns, so a tall or wide merge goes on past them: follow it to its end in the source, as long as the
+   * visible items in between show its source items one to one (no collapsed group or total in between).
+   */
+  #farEdge(p: MergePiece, axis: AxisName, dir: 1 | -1): number {
+    const rows = axis === 'rows';
+    const edge = rows ? (dir > 0 ? p.vr1 : p.vr0) : (dir > 0 ? p.vc1 : p.vc0);
+    const m = p.merge;
+    const end = rows ? (dir > 0 ? m.r1 : m.r0) : (dir > 0 ? m.c1 : m.c0);
+    const src = rows ? this.rowSource(edge) : this.colSource(edge);
+    if (src < 0 || src === end) return edge;
+    const [v, exact] = this.model.visibleOf ? this.model.visibleOf(axis, end) : [rows ? end : this.#visibleCol(end), true];
+    const count = rows ? this.rows.count : this.cols.count;
+    return exact && v >= 0 && v < count && v - edge === end - src ? v : edge;
   }
 
   #goTo(cell: CellPosition, extend: boolean): void {
@@ -2183,7 +2306,7 @@ export class GridEngine {
     let { r, c } = this.sel.active;
     for (let guard = 0; guard < 10_000; guard++) {
       const p = pieceAt(this.#pieces, r, c);
-      r = dir > 0 ? (p ? p.vr1 : r) + 1 : (p ? p.vr0 : r) - 1;
+      r = dir > 0 ? (p ? this.#farEdge(p, 'rows', 1) : r) + 1 : (p ? this.#farEdge(p, 'rows', -1) : r) - 1;
       if (r > g.r1) {
         r = g.r0;
         c = c + 1 > g.c1 ? g.c0 : c + 1;
@@ -2274,40 +2397,47 @@ export class GridEngine {
     const { active, ranges } = this.sel;
     const activeRange = cellRange(this.#pieces, active);
     const single = ranges.length === 1 && isActiveOnly(this.#pieces, ranges[0], active);
-    const P = this.pinCount;
-    // Pinned columns have their own selection layer; a range across both is drawn in two parts, with no
-    // border where they meet.
-    const pinRect = (a0: number, a1: number, b0: number, b1: number): SelectionBox | null => {
+    const [m0, m1] = this.#middle();
+    // Pinned columns have their own selection layers; a range across a pane boundary is drawn in parts, with
+    // no border where they meet.
+    const paneRect = (pane: PinPane, a0: number, a1: number, b0: number, b1: number): SelectionBox | null => {
       const ra = Math.max(a0, r0);
       const rb = Math.min(a1, r1);
-      const cb = Math.min(b1, P - 1);
-      if (ra > rb || b0 > cb) return null;
+      const ca = Math.max(b0, pane.first);
+      const cb = Math.min(b1, pane.first + pane.count - 1);
+      if (ra > rb || ca > cb) return null;
       const top = rows.offsetOf(ra);
-      const left = cols.offsetOf(b0);
-      const edges = `${ra === a0 ? 1 : 0}${cb === b1 ? 1 : 0}${rb === a1 ? 1 : 0}1`;
-      return { x: left, y: top - this.anchorRowPx, w: cols.offsetOf(cb + 1) - left, h: rows.offsetOf(rb + 1) - top, edges };
+      const left = cols.offsetOf(ca);
+      const edges = `${ra === a0 ? 1 : 0}${cb === b1 ? 1 : 0}${rb === a1 ? 1 : 0}${ca === b0 ? 1 : 0}`;
+      return { x: left - pane.base, y: top - this.anchorRowPx, w: cols.offsetOf(cb + 1) - left, h: rows.offsetOf(rb + 1) - top, edges };
     };
     const mainRect = (a0: number, a1: number, b0: number, b1: number): SelectionBox | null => {
-      if (b1 < P) return null;
-      const box = rect(a0, a1, Math.max(b0, P), b1);
-      if (box && b0 < P) box.edges = `${box.edges.slice(0, 3)}0`;
+      if (b1 < m0 || b0 > m1) return null;
+      const box = rect(a0, a1, Math.max(b0, m0), Math.min(b1, m1));
+      if (box && (b0 < m0 || b1 > m1)) {
+        const e = box.edges;
+        box.edges = `${e[0]}${b1 > m1 ? 0 : e[1]}${e[2]}${b0 < m0 ? 0 : e[3]}`;
+      }
       return box;
     };
-    const boxes = single ? [] : ranges.map((g) => (P ? mainRect(g.r0, g.r1, g.c0, g.c1) : rect(g.r0, g.r1, g.c0, g.c1)));
-    const act = P ? mainRect(activeRange.r0, activeRange.r1, activeRange.c0, activeRange.c1) : rect(activeRange.r0, activeRange.r1, activeRange.c0, activeRange.c1);
+    const boxes = single ? [] : ranges.map((g) => mainRect(g.r0, g.r1, g.c0, g.c1));
+    const act = mainRect(activeRange.r0, activeRange.r1, activeRange.c0, activeRange.c1);
     this.selLayer.render(boxes, act);
-    if (P) {
-      const pinBoxes = single ? [] : ranges.map((g) => pinRect(g.r0, g.r1, g.c0, g.c1));
-      this.pinSel.render(pinBoxes, pinRect(activeRange.r0, activeRange.r1, activeRange.c0, activeRange.c1));
+    for (const pane of this.#panes()) {
+      if (!pane.count) continue;
+      const paneBoxes = single ? [] : ranges.map((g) => paneRect(pane, g.r0, g.r1, g.c0, g.c1));
+      pane.sel.render(paneBoxes, paneRect(pane, activeRange.r0, activeRange.r1, activeRange.c0, activeRange.c1));
     }
 
     // Screen readers: point the grid at the element that shows the active cell.
     let el: HTMLElement | null | undefined = null;
-    if (active.c < P) el = this.pinSlots[active.r % this.N]?.r === active.r ? this.pinSlots[active.r % this.N].cells[active.c]?.el : null;
-    else if (act) {
-      const p = pieceAt(this.#pieces, active.r, active.c);
-      el = p ? this.mergeLayer.live.get(p.key)?.el : this.rowSlots[active.r % this.N]?.cells[active.c % this.M]?.el;
-    }
+    const p = pieceAt(this.#pieces, active.r, active.c);
+    const pane = this.#paneOf(active.c);
+    if (p) el = this.pinL.merges.live.get(p.key)?.el ?? this.pinR.merges.live.get(p.key)?.el ?? this.mergeLayer.live.get(p.key)?.el;
+    else if (pane) {
+      const slot = pane.slots[active.r % this.N];
+      el = slot?.r === active.r ? slot.cells[active.c - pane.first]?.el : null;
+    } else if (act) el = this.rowSlots[active.r % this.N]?.cells[active.c % this.M]?.el;
     if (el && !el.id) el.id = `${this.#uid}-${++this.#idSeq}`;
     const id = el ? el.id : '';
     if (id !== this.#activeId) {
@@ -2485,7 +2615,7 @@ export class GridEngine {
     }
     if (empty !== this.#emptyShown) {
       this.#emptyShown = empty;
-      for (const layer of [this.bodyLayer, this.mergeLayerEl, this.selLayerEl, this.rowHeadLayer]) layer.style.visibility = empty ? 'hidden' : '';
+      for (const layer of [this.bodyLayer, this.mergeLayerEl, this.selLayerEl, this.rowHeadLayer, this.pinL.layer, this.pinL.mergeEl, this.pinR.layer, this.pinR.mergeEl]) layer.style.visibility = empty ? 'hidden' : '';
     }
   }
 
@@ -2521,14 +2651,13 @@ export class GridEngine {
     if (this.anchorRow === null || Math.abs(r0px - this.anchorRowPx) > REBASE_PX) {
       this.anchorRow = r0;
       this.anchorRowPx = r0px;
-      for (const slot of this.rowSlots) slot.r = -1;
-      for (const slot of this.pinSlots) slot.r = -1;
+      for (const slot of this.#allSlots()) slot.r = -1;
     }
     const c0px = cols.offsetOf(c0);
     if (this.anchorCol === null || Math.abs(c0px - this.anchorColPx) > REBASE_PX) {
       this.anchorCol = c0;
       this.anchorColPx = c0px;
-      for (const slot of [...this.rowSlots, ...this.pinSlots]) for (const cell of slot.cells) cell.c = -1;
+      for (const slot of this.#allSlots()) for (const cell of slot.cells) cell.c = -1;
     }
     const ox = vx - this.anchorColPx;
     const oy = vy - this.anchorRowPx;
@@ -2540,20 +2669,30 @@ export class GridEngine {
     this.colHeadLayer.style.transform = `translate3d(${-ox}px,0,0)`;
     this.rowHeadLayer.style.transform = `translate3d(0,${-oy}px,0)`;
     this.#ensurePinPool();
-    if (this.pinCount) {
-      this.pinLayer.style.transform = `translate3d(0,${-oy}px,0)`;
-      this.pinSelEl.style.transform = `translate3d(0,${-oy}px,0)`;
-      const pinW = cols.offsetOf(this.pinCount);
-      const sig = Array.from({ length: this.pinCount + 1 }, (_, j) => cols.offsetOf(j)).join(',');
-      if (sig !== this.#pinSig) {
-        this.#pinSig = sig;
-        for (const slot of this.pinSlots) for (const cell of slot.cells) cell.c = -1;
+    for (const pane of this.#panes()) {
+      if (!pane.count) {
+        pane.w = 0;
+        continue;
       }
-      if (pinW !== this.pinW) {
-        this.pinW = pinW;
-        this.host.style.setProperty('--vg-pin-w', `${pinW}px`);
+      const shift = `translate3d(0,${-oy}px,0)`;
+      pane.layer.style.transform = shift;
+      pane.mergeEl.style.transform = shift;
+      pane.selEl.style.transform = shift;
+      pane.base = cols.offsetOf(pane.first);
+      const sig = Array.from({ length: pane.count + 1 }, (_, j) => cols.offsetOf(pane.first + j) - pane.base).join(',');
+      if (sig !== pane.sig) {
+        pane.sig = sig;
+        for (const slot of pane.slots) for (const cell of slot.cells) cell.c = -1;
       }
-    } else this.pinW = 0;
+      const w = cols.offsetOf(pane.first + pane.count) - pane.base;
+      const x = pane.right ? this.#rightX() : 0;
+      if (w !== pane.w || x !== pane.x) {
+        pane.w = w;
+        pane.x = x;
+        this.host.style.setProperty(pane.right ? '--vg-pinr-w' : '--vg-pin-w', `${w}px`);
+        if (pane.right) this.host.style.setProperty('--vg-pinr-x', `${x}px`);
+      }
+    }
 
     const xs = this.#xs;
     const ws = this.#ws;
@@ -2646,9 +2785,11 @@ export class GridEngine {
     }
     if (checks) this.#paintCornerCheck();
     this.colSpans.render(colSegs, { axis: cols, anchorPx: this.anchorColPx, viewStart: ox, lo: c0, hi: c1, bandOff: this.tierOff, labelExtent: 110 });
-    if (this.pinCount) {
-      const P = this.pinCount;
-      this.pinSpans.render(decorate(model.colSegments(0, P - 1, label)), { axis: cols, anchorPx: 0, viewStart: 0, lo: 0, hi: P - 1, bandOff: this.tierOff, labelExtent: 110 });
+    for (const pane of this.#panes()) {
+      if (!pane.count) continue;
+      const lo = pane.first;
+      const hi = pane.first + pane.count - 1;
+      pane.spans.render(decorate(model.colSegments(lo, hi, label)), { axis: cols, anchorPx: pane.base, viewStart: 0, lo, hi, bandOff: this.tierOff, labelExtent: 110 });
     }
     this.rowSpans.render(rowSegs, { axis: rows, anchorPx: this.anchorRowPx, viewStart: oy, lo: r0, hi: r1, bandOff: this.rowBandOff, labelExtent: rows.minSize });
   }
@@ -2659,23 +2800,75 @@ export class GridEngine {
    */
   #renderMerges(r0: number, c0: number, ox: number, oy: number, valueAt: (rs: number, cs: number) => unknown): void {
     const cover = this.#cover;
+    const panes = this.#panes();
+    const [m0, m1] = this.#middle();
     // Merged cells belong to the unsorted layout; while sorted they would join unrelated rows, so they are hidden.
     const transformed = this.sortParam || this.filterParam || this.#serverColFilter; // also columns renumbered by the server
-    if (transformed) cover.fill(0);
-    const pieces = transformed ? [] : mergePieces(this.merges, r0, this.#rowSrc, this.#rowExact, c0, this.#colSrc, this.#colExact, cover);
-    const anchors = new Set<string>();
-    for (const p of pieces) {
-      const m = p.merge;
-      if (m.label !== undefined) p.text = m.label;
-      else {
-        const value = valueAt(m.r0, m.c0);
-        p.text = value === undefined ? undefined : this.#textOf(value, m.r0, m.c0);
+    let pieces: MergePiece[] = [];
+    const panePieces: MergePiece[][] = [[], []];
+    if (transformed) {
+      cover.fill(0);
+      for (const pane of panes) pane.cover.fill(0);
+    } else {
+      // Pinned columns have their own layers, which do not scroll sideways: the body's pieces leave them out.
+      let exact = this.#colExact;
+      const M = exact.length;
+      if (m0 > c0 || m1 < c0 + M - 1) {
+        exact = this.#bodyExact;
+        exact.set(this.#colExact);
+        if (m0 > c0) exact.fill(0, 0, Math.min(m0 - c0, M));
+        if (m1 < c0 + M - 1) exact.fill(0, Math.max(0, m1 + 1 - c0), M);
       }
-      if (p.text === undefined) anchors.add(`${m.r0}:${m.c0}`);
+      pieces = mergePieces(this.merges, r0, this.#rowSrc, this.#rowExact, c0, this.#colSrc, exact, cover);
+      panes.forEach((pane, i) => {
+        if (!pane.count) return void pane.cover.fill(0);
+        for (let j = 0; j < pane.count; j++) {
+          pane.src[j] = this.colSource(pane.first + j);
+          pane.exact[j] = this.model.colExact ? (this.model.colExact(pane.first + j) ? 1 : 0) : 1;
+        }
+        panePieces[i] = mergePieces(this.merges, r0, this.#rowSrc, this.#rowExact, pane.first, pane.src, pane.exact, pane.cover);
+      });
     }
-    this.mergeLayer.render(pieces, { rows: this.rows, cols: this.cols, anchorRowPx: this.anchorRowPx, anchorColPx: this.anchorColPx, ox, oy });
+    const drawn = [panePieces[0], pieces, panePieces[1]];
+    const anchors = new Set<string>();
+    for (const list of drawn) {
+      for (const p of list) {
+        const m = p.merge;
+        if (m.label !== undefined) p.text = m.label;
+        else {
+          const value = valueAt(m.r0, m.c0);
+          p.text = value === undefined ? undefined : this.#textOf(value, m.r0, m.c0);
+        }
+        if (p.text === undefined) anchors.add(`${m.r0}:${m.c0}`);
+      }
+    }
+    // A merge crossing a pane boundary is drawn as separate pieces, each showing the value, so a part that
+    // scrolls still says what it is. For selection, the keyboard and copy they are one cell.
+    let logical: MergePiece[] = pieces;
+    if (panePieces[0].length || panePieces[1].length) {
+      logical = [];
+      const open = new Map<string, number>(); // merge|rows → index in logical of a piece ending at a boundary
+      for (const list of drawn) {
+        for (const p of list) {
+          const k = `${p.merge.key}|${p.vr0}|${p.vr1}`;
+          const i = p.vc0 === m0 || p.vc0 === m1 + 1 ? open.get(k) : undefined;
+          let at: number;
+          if (i !== undefined && logical[i].vc1 + 1 === p.vc0) {
+            logical[i] = { ...logical[i], vc1: p.vc1 };
+            at = i;
+          } else {
+            logical.push(p);
+            at = logical.length - 1;
+          }
+          if (p.vc1 === m0 - 1 || p.vc1 === m1) open.set(k, at);
+        }
+      }
+    }
+    // The body's labels keep clear of the left pane drawn over its left edge.
+    this.mergeLayer.render(pieces, { rows: this.rows, cols: this.cols, anchorRowPx: this.anchorRowPx, anchorColPx: this.anchorColPx, ox: ox + this.pinL.w, oy });
+    panes.forEach((pane, i) => pane.merges.render(panePieces[i], { rows: this.rows, cols: this.cols, anchorRowPx: this.anchorRowPx, anchorColPx: pane.base, ox: 0, oy }));
     this.#mergeAnchors = anchors;
-    this.#pieces = pieces;
+    this.#pieces = logical;
   }
 
   /** Body rows: only rows whose slot changed are repositioned; only unfilled cells are written. */
@@ -2692,7 +2885,7 @@ export class GridEngine {
     const bands = model.rowBands.length;
     const tiers = model.colTiers.length;
     const checks = this.#checksOn();
-    const pinned = this.pinCount;
+    const [m0, m1] = this.#middle();
     let rowWrites = 0;
     let cellWrites = 0;
     for (let r = r0; r <= r1; r++) {
@@ -2721,7 +2914,7 @@ export class GridEngine {
         const cell = slot.cells[c % M];
         const k = c - c0;
         // Under a merged cell, or a pinned column (drawn in its own layer): hidden.
-        const covered = cover[coverRow + k] || (c < pinned ? 1 : 0);
+        const covered = cover[coverRow + k] || (c < m0 || c > m1 ? 1 : 0); // pinned: drawn in a pane
         if (covered !== cell.covered) {
           cell.el.style.visibility = covered ? 'hidden' : '';
           cell.covered = covered;
@@ -2779,8 +2972,11 @@ export class GridEngine {
 
   /** Pinned columns: cells at fixed x (they do not scroll sideways), same rows as the body. */
   #renderPinned(r0: number, r1: number, valueAt: (rs: number, cs: number) => unknown): void {
-    const P = this.pinCount;
-    if (!P) return;
+    for (const pane of this.#panes()) if (pane.count) this.#renderPane(pane, r0, r1, valueAt);
+  }
+
+  #renderPane(pane: PinPane, r0: number, r1: number, valueAt: (rs: number, cs: number) => unknown): void {
+    const { count: P, first } = pane;
     const { N, rows, cols, model } = this;
     const selRanges = this.sel.ranges;
     const bands = model.rowBands.length;
@@ -2790,11 +2986,11 @@ export class GridEngine {
     const srcs = new Array<number>(P);
     const infos = new Array<ColumnInfo>(P);
     for (let j = 0; j < P; j++) {
-      srcs[j] = this.colSource(j);
+      srcs[j] = this.colSource(first + j);
       infos[j] = this.#infoOf(srcs[j]);
     }
     for (let r = r0; r <= r1; r++) {
-      const slot = this.pinSlots[r % N];
+      const slot = pane.slots[r % N];
       if (!slot) continue;
       if (slot.r !== r) {
         slot.r = r;
@@ -2814,20 +3010,27 @@ export class GridEngine {
         slot.cls = cls;
       }
       const rs = rowSrc[r - r0];
+      const coverRow = (r - r0) * P;
       for (let j = 0; j < P; j++) {
         const cell = slot.cells[j];
         let clsDirty = false;
-        const selected = inRanges(selRanges, r, j);
+        const covered = pane.cover[coverRow + j];
+        if (covered !== cell.covered) {
+          cell.el.style.visibility = covered ? 'hidden' : ''; // under a merged cell
+          cell.covered = covered;
+        }
+        const c = first + j;
+        const selected = inRanges(selRanges, r, c);
         if (selected !== cell.selected) {
           cell.el.setAttribute('aria-selected', selected ? 'true' : 'false');
           cell.selected = selected;
         }
-        if (cell.c !== j) {
-          cell.c = j;
-          cell.el.setAttribute('aria-colindex', String(j + 1 + bands));
-          cell.el.style.transform = `translate3d(${cols.offsetOf(j)}px,0,0)`;
-          cell.el.style.width = `${cols.sizeOf(j)}px`;
-          cell.base = `vg-cell${model.colKind(j)}${infos[j].cls}${j === P - 1 ? ' vg-pin-last' : ''}`;
+        if (cell.c !== c) {
+          cell.c = c;
+          cell.el.setAttribute('aria-colindex', String(c + 1 + bands));
+          cell.el.style.transform = `translate3d(${cols.offsetOf(c) - pane.base}px,0,0)`;
+          cell.el.style.width = `${cols.sizeOf(c)}px`;
+          cell.base = `vg-cell${model.colKind(c)}${infos[j].cls}`;
           cell.filled = false;
           clsDirty = true;
         }
@@ -2835,7 +3038,7 @@ export class GridEngine {
           const cs = srcs[j];
           const value = rs < 0 || cs < 0 ? null : valueAt(rs, cs);
           if (value !== undefined) {
-            const extra = rs < 0 || cs < 0 ? this.#fillBlank(cell) : this.#fillCell(cell, infos[j], r, j, rs, cs, value);
+            const extra = rs < 0 || cs < 0 ? this.#fillBlank(cell) : this.#fillCell(cell, infos[j], r, c, rs, cs, value);
             if (extra !== cell.extra) {
               cell.extra = extra;
               clsDirty = true;
@@ -3052,8 +3255,9 @@ export class GridEngine {
     const R = split(ra, rb, this.rowSource, BR, midR, RUN_MIN_ROWS);
     const C = split(ca, cb, this.colSource, BC, midC, RUN_MIN_COLS);
     // Pinned columns are on screen whatever the horizontal scroll.
-    if (this.pinCount) {
-      const pinned = split(0, this.pinCount - 1, this.colSource, BC, 0, RUN_MIN_COLS);
+    for (const pane of this.#panes()) {
+      if (!pane.count) continue;
+      const pinned = split(pane.first, pane.first + pane.count - 1, this.colSource, BC, pane.first, RUN_MIN_COLS);
       for (const [id] of pinned.dense) if (!C.dense.has(id)) C.dense.set(id, 0);
       for (const [id] of pinned.sparse) if (!C.sparse.has(id)) C.sparse.set(id, 0);
     }

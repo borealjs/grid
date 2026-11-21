@@ -157,6 +157,8 @@ export interface GridModel {
   // Column order and pinned columns (tables).
   /** Visible columns kept at the start while scrolling sideways (they come first). */
   pinnedCols?(): number;
+  /** Visible columns kept at the right edge while scrolling sideways (they come last). */
+  pinnedColsRight?(): number;
   /** The column order, compact: source indexes and inclusive [first, last] runs. */
   columnOrder?(): (number | [number, number])[];
   /** A new order: compact, a list of source indexes, or (column lists) keys. */

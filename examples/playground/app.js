@@ -70,7 +70,7 @@ const samples = {}; // last request / response per call kind, for the "server co
 
 // ================================================================== worker "server" + simulated network
 
-const worker = new Worker(new URL('./server-worker.js', import.meta.url));
+const worker = new Worker(new URL('./server-worker.js', import.meta.url), { type: 'module' });
 let rpcSeq = 0;
 const pending = new Map();
 worker.onmessage = (e) => {
@@ -159,13 +159,16 @@ async function net(op, args, { signal, onProgress, kind, detail = '', cells = 0 
 }
 
 /** Builds that load the dataset into the server: no latency, progress in the sidebar. */
+let builds = 0; // dataset loads in progress (the grid's own "Building the view" bar must not hide theirs)
 async function build(op, args) {
+  builds++;
   showProgress('Starting…', 0);
   $$('#genForm button, #virtualForm button, #sampleCsv').forEach((b) => { b.disabled = true; });
   try {
     const res = await workerCall(op, args, { onProgress: (p) => showProgress(p.phase, p.total ? p.done / p.total : null) });
     return res.result;
   } finally {
+    builds--;
     hideProgress();
     $$('#genForm button, #virtualForm button, #sampleCsv').forEach((b) => { b.disabled = false; });
   }
@@ -193,23 +196,23 @@ async function generateData() {
   onDataset(info, performance.now() - t0, { keepLayout: true });
 }
 
-async function loadCsvText(text, name) {
+async function loadCsv(source, name) {
   const t0 = performance.now();
   try {
-    const info = await build('parseCsv', { text, name, header: $('#csvHeader').checked, delimiter: $('#csvDelimiter').value });
+    // A File goes to the worker as is and is streamed there: the page never holds the text.
+    const info = await build('parseCsv', { ...source, name, header: $('#csvHeader').checked, delimiter: $('#csvDelimiter').value });
     onDataset(info, performance.now() - t0, { keepLayout: false });
-    toast(`Loaded ${name}: ${fmtInt(info.rows)} rows, ${info.fields.length} columns`);
+    toast(`Loaded ${name}: ${fmtInt(info.rows)} rows, ${info.fields.length} columns (${fmtBytes(info.bytes)} in memory)`);
   } catch (err) {
     toast(`Could not read ${name}: ${err.message}`);
   }
 }
+const loadCsvText = (text, name) => loadCsv({ text }, name);
 
 async function loadCsvFile(file) {
   if (!file) return;
-  if (file.size > 400 * 1024 * 1024) { toast('Files up to 400 MB work best in a browser tab.'); return; }
-  showProgress(`Reading ${file.name}…`, null);
-  const text = await file.text();
-  await loadCsvText(text, file.name);
+  if (file.size > 3 * 1024 ** 3) { toast('Files up to about 3 GB can be streamed into a browser tab.'); return; }
+  await loadCsv({ file }, file.name);
 }
 
 function sampleCsv() {
@@ -705,7 +708,8 @@ function pivotSource(cfg, serial) {
     maxCellsPerRequest: state.server.maxCells,
     async getLayout({ query, signal, onProgress }) {
       const q = plain(query);
-      const res = await net('pivotLayout', { cfg, query: q }, { signal, onProgress, kind: 'layout', detail: describeQuery(q) });
+      const shown = (p) => { onProgress?.(p); if (!$('#progress').hidden && p?.phase) showProgress(p.phase, p.total ? p.done / p.total : null); };
+      const res = await net('pivotLayout', { cfg, query: q }, { signal, onProgress: shown, kind: 'layout', detail: describeQuery(q) });
       if (live()) { lastPivotInfo = res.info; renderSummary(); }
       return res;
     },
@@ -882,12 +886,14 @@ async function createGridNow() {
       ariaLabel: 'Data table',
     };
   }
+  // The first layout of a big dataset (a pivot over millions of rows) can take seconds: say so, with its progress.
+  if (!dataset.virtual && !builds) showProgress('Building the view…', null);
   grid = createGrid(host, options);
   grid.ready.then(() => {
     if (serial !== gridSerial) return;
     renderLevelBar();
     renderSummary();
-  }).catch((err) => setEvent(`⚠ ${err.message ?? err}`));
+  }).catch((err) => setEvent(`⚠ ${err.message ?? err}`)).finally(() => { if (serial === gridSerial && !builds) hideProgress(); });
 }
 
 /** Option changes that the grid applies in place (or rebuilds itself, keeping scroll and query). */

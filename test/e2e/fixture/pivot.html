@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>grid e2e pivot fixture</title>
+  <link rel="stylesheet" href="/packages/grid-core/src/grid.css">
+  <style>body{margin:0} #grid{height:500px;width:900px}</style>
+</head>
+<body>
+  <div id="grid"></div>
+  <script type="module">
+    import { createGrid } from '/packages/grid-core/dist/index.js';
+    // Rows: 2 regions x 3 countries x 4 cities, with country + region subtotals and a grand total (33 rows).
+    // Columns: 2 years x 4 quarters, with a year subtotal (10 columns). A cell shows "r<row>c<col>" (source indexes).
+    // ?big=1: 2 regions x 30 countries x 40 cities (2,463 rows), so a region's header spans ~1,230 rows.
+    const big = new URLSearchParams(location.search).get('big') === '1';
+    const layout = {
+      type: 'pivot',
+      rows: { levels: [{ name: 'Region', subtotal: true, collapsible: true }, { name: 'Country', subtotal: true, collapsible: true }], leafName: 'City', leafSize: 10, roots: 2, fanout: big ? [30, 40] : [3, 4], grandTotal: true },
+      cols: { levels: [{ name: 'Year', subtotal: true, collapsible: true }], leafName: 'Quarter', leafSize: 90, roots: 2, fanout: [4] },
+    };
+    const label = (axis, level, i) => `${axis === 'rows' ? ['Region', 'Country', 'City'][level] : ['Year', 'Quarter'][level]} ${i}`;
+    const dataSource = {
+      getLayout: async () => layout,
+      getLabels: async ({ axis, level, start, count }) => Array.from({ length: count }, (_, i) => label(axis, level, start + i)),
+      getCells: async ({ rects }) => rects.map((r) => Array.from({ length: r.rowCount }, (_, i) => Array.from({ length: r.colCount }, (_, j) => `r${r.row + i}c${r.col + j}`))),
+    };
+    const events = (window.__events = []);
+    const grid = (window.__grid = createGrid(document.getElementById('grid'), { dataSource, layout, ariaLabel: 'Pivot', expandable: true }));
+    await grid.ready;
+    window.__ready = true;
+  </script>
+</body>
+</html>

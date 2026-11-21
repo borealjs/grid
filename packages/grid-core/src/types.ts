@@ -352,8 +352,11 @@ export interface ColumnDef<V = unknown, Row = any> {
   sortable?: boolean;
   resizable?: boolean;
   hidden?: boolean;
-  /** Keep the column at the start while scrolling sideways (tables). */
-  pinned?: boolean;
+  /**
+   * Keep the column in view while scrolling sideways (tables): `'left'` (or `true`) moves it to the start,
+   * `'right'` to the end.
+   */
+  pinned?: boolean | 'left' | 'right';
   /** false: the column cannot be dragged to another place. */
   reorderable?: boolean;
   /** Group name for the column chooser (column filter level 0). */
@@ -599,6 +602,8 @@ export interface GridOptions<V = unknown> {
   columnOrder?: (string | number | [number, number])[];
   /** Pin this many leading columns (default: the columns marked `pinned`). Works with getColumn tables too. */
   pinnedColumns?: number;
+  /** Pin this many trailing columns to the right edge (default: the columns marked `pinned: 'right'`). */
+  pinnedColumnsRight?: number;
 
   // Grid-wide hooks (columns can override them)
   format?(value: V, ctx: CellContext<V> | null): string;

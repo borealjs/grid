@@ -157,6 +157,28 @@ test('table model: hidden columns, groups, keys and filter descriptions', async 
   assert.equal(model.cols.count, 2);
 });
 
+test('table model: columns pinned left and right, with hidden columns and a column order', () => {
+  const columns = [
+    { key: 'a' }, { key: 'b', pinned: 'right' }, { key: 'c', pinned: 'left' }, { key: 'd', hidden: true }, { key: 'e' }, { key: 'f', pinned: 'right', width: 60 },
+  ];
+  const source = { getCells: () => [], getLayout: () => ({ rowCount: 3 }) };
+  const model = createTableModel({ columns, columnOrder: ['f', 'e', 'b', 'a', 'c', 'd'] }, { rowCount: 3 }, source);
+  // Left-pinned c first, then e, a, then the right-pinned f, b (in their order); hidden d is skipped.
+  const shown = () => Array.from({ length: model.cols.count }, (_, i) => model.colSource(i));
+  assert.deepEqual(shown(), [2, 4, 0, 5, 1]);
+  assert.equal(model.pinnedCols(), 1);
+  assert.equal(model.pinnedColsRight(), 2);
+  assert.equal(model.cols.sizeOf(3), 60);
+  // A new order keeps the pinned columns on their sides.
+  model.setColumnOrder(['b', 'a', 'f', 'e', 'c', 'd']);
+  assert.deepEqual(shown(), [2, 0, 4, 1, 5]);
+  // pinnedColumnsRight overrides the marks, and never takes columns already pinned on the left.
+  const counted = createTableModel({ columnCount: 1_000_000, getColumn: (i) => ({ title: `C${i}` }), pinnedColumns: 2, pinnedColumnsRight: 3 }, { rowCount: 3 }, source);
+  assert.equal(counted.pinnedColsRight(), 3);
+  const tiny = createTableModel({ columnCount: 3, pinnedColumns: 2, pinnedColumnsRight: 5 }, { rowCount: 3 }, source);
+  assert.equal(tiny.pinnedColsRight(), 1);
+});
+
 test('table model: column order, pinned columns first, row checkbox band', () => {
   const columns = [
     { key: 'a' }, { key: 'b', pinned: true }, { key: 'c', hidden: true }, { key: 'd' }, { key: 'e', pinned: true, width: 50 },

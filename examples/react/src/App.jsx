@@ -193,6 +193,7 @@ function InMemoryDemo({ grid: gridProps }) {
           field="link"
           title="Open"
           width={90}
+          pinned="right"
           sortable={false}
           filter={false}
           value={(row) => row.id}
@@ -530,7 +531,7 @@ function HugeTableDemo({ grid: gridProps }) {
     setLayout(null);
     source.getLayout({ query: EMPTY_QUERY }).then(setLayout, setError);
   }, [source]);
-  if (error) return <p className="note">{IN_BROWSER ? 'Could not load the table' : 'Start the reference server first (npm start, port 5174)'}: {error.message}</p>;
+  if (error) return <p className="note">{IN_BROWSER ? 'Could not load the table' : 'Start the reference server first (npm run dev, port 5174)'}: {error.message}</p>;
   return (
     <section className="demo">
       <ServerToolbar
