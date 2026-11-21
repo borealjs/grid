@@ -1,6 +1,6 @@
 {
   "name": "@borealjs/react-grid",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React data grid for huge datasets: in-memory rows or any backend, React cells, headers and filters, sorting, filtering, pivots and copy.",
   "type": "module",
   "license": "MIT",
@@ -31,7 +31,7 @@
   ],
   "sideEffects": false,
   "dependencies": {
-    "@borealjs/grid-core": "0.1.0"
+    "@borealjs/grid-core": "0.1.1"
   },
   "peerDependencies": {
     "react": ">=18",

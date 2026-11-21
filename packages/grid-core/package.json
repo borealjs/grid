@@ -1,6 +1,6 @@
 {
   "name": "@borealjs/grid-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Fast data grid for the web: billions of rows from memory or any backend, with sorting, filtering, pivots, selection and copy. No dependencies.",
   "type": "module",
   "license": "MIT",
