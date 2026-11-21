@@ -35,6 +35,6 @@ test('createColumnHelper builds plain column objects', () => {
 });
 
 test("the package is marked 'use client' for React Server Components", async () => {
-  const src = await readFile(new URL('../packages/react-grid/src/index.js', import.meta.url), 'utf8');
+  const src = await readFile(new URL('../packages/react-grid/dist/index.js', import.meta.url), 'utf8');
   assert.ok(src.startsWith("'use client';"));
 });

@@ -53,7 +53,17 @@
 // Data is procedural (same value for the same cell every time), so any size works without storage.
 // Pivot values are built top-down so every subtotal is exactly the sum of its children.
 
-import { TreeAxis, lastLE } from './packages/grid-core/src/tree.js';
+import { TreeAxis } from '@borealjs/grid-core';
+
+/** Largest index in [lo, hi] whose value is <= v (assumes arr[lo] <= v). */
+function lastLE(arr, lo, hi, v) {
+  while (lo < hi) {
+    const mid = lo + Math.ceil((hi - lo) / 2);
+    if (arr[mid] <= v) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
 
 const DEFAULT_ROWS = 1_000_000_000;
 const DEFAULT_COLS = 1_000_000;

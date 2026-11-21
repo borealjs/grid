@@ -1,7 +1,7 @@
 # @borealjs/react-grid
 
 [![npm](https://img.shields.io/npm/v/@borealjs/react-grid)](https://www.npmjs.com/package/@borealjs/react-grid)
-[![Types](https://img.shields.io/npm/types/@borealjs/react-grid)](https://github.com/borealjs/grid/blob/main/packages/react-grid/index.d.ts)
+[![Types](https://img.shields.io/npm/types/@borealjs/react-grid)](https://github.com/borealjs/grid/blob/main/packages/react-grid/src/types.ts)
 [![React 18 and 19](https://img.shields.io/badge/React-18%20%7C%2019-087ea4?logo=react)](https://react.dev)
 [![License](https://img.shields.io/npm/l/@borealjs/react-grid)](https://github.com/borealjs/grid/blob/main/LICENSE)
 

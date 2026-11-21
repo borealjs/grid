@@ -78,3 +78,17 @@ createGrid(document.body, {
   onViewChange: (info) => console.log(info.progress?.done, info.cancelled),
 }).cancel();
 export const Rules = ({ customers }: { customers: Customer[] }) => <VirtualGrid rows={customers} sortable={(t) => t.axis === 'cols' && t.key !== 'name'} filterable={false} />;
+
+// Generated declarations: typed stats, engine and in-memory sources.
+import { createArraySource, GridEngine, VirtualGrid as LegacyEngine, type GridStats, type GridModel, type ColumnDef as CoreColumnDef } from '@borealjs/grid-core';
+const g = createGrid(document.body, { dataSource: ds });
+const s: GridStats | undefined = g.stats();
+console.log(s?.cache.inflight, g.engine instanceof GridEngine, LegacyEngine === GridEngine, g.levels?.rows[0]?.collapsible);
+const people = createArraySource([{ name: 'Ada', age: 36 }], { columns: [{ key: 'name' }, { key: 'age', value: (r) => r.age * 2 }] });
+const first: { name: string; age: number } | undefined = people.rowAt(0, { sort: [], filter: [], columnFilter: [] });
+console.log(first?.name);
+// @ts-expect-error: rows are typed
+people.setRows([{ nope: true }]);
+const typedCore: CoreColumnDef<number, { n: number }> = { key: 'n', value: (row) => row.n, format: (v) => v.toFixed(1) };
+export const model: GridModel | undefined = g.engine?.model;
+export const coreCols = [typedCore];

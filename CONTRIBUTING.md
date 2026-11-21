@@ -16,30 +16,53 @@ You need Node 20 or newer.
 git clone https://github.com/borealjs/grid.git && cd grid && npm install
 ```
 
+`npm install` also builds the packages: [tsdown](https://tsdown.dev) bundles each one into a minified
+`dist/index.js` and a single `dist/index.d.ts` (config in `packages/*/tsdown.config.ts`).
+
 | Command | What it does |
 |---|---|
+| `npm run build` | builds both packages; `npm start`, `npm test` and `build:demo` run it first |
 | `npm start` | demo server and the plain JavaScript example at http://localhost:5174 |
-| `npm run dev:react` | the live demo (React) at http://localhost:5175, with hot reload (keep `npm start` running) |
+| `npm run dev:react` | the live demo (React) at http://localhost:5175, with hot reload of the demo and of the packages' TypeScript sources (keep `npm start` running) |
 | `npm run build:demo` | the static live demo (no server) in `examples/react/dist`; deployed to GitHub Pages from `main` |
 | `npm run preview:demo` | builds it and serves it at http://localhost:4173/grid/, as it will look on GitHub Pages |
-| `npm test` | tests |
-| `npm run typecheck` | checks the TypeScript types against `test/types` |
+| `npm test` | tests: the public API against the built bundles, internals from the TypeScript sources (via tsx) |
+| `npm run typecheck` | builds, type-checks both packages (`tsc`, no output), then the published types against `test/types` |
 
 The repository is an npm workspace:
 
 | Folder | |
 |---|---|
-| `packages/grid-core` | `@borealjs/grid-core`: the grid (plain ES modules, no build step) |
+| `packages/grid-core` | `@borealjs/grid-core`: the grid, in TypeScript (see below) |
 | `packages/react-grid` | `@borealjs/react-grid`: the React component and hooks |
 | `examples/` | `react/`: the live demo (`src/inBrowserApi.js` runs the demo backend in the browser on GitHub Pages); `vanilla/`: the plain JavaScript example |
 | `server.mjs` | demo server: the `/api` protocol over HTTP, plus the demo pages |
 | `demo-backend.mjs` | the demo backend's data and request handling; the static live demo runs it in the browser |
 | `test/` | tests and type tests |
 
+### Where things are in `packages/grid-core/src`
+
+| Path | |
+|---|---|
+| `index.ts` | the public exports |
+| `types.ts` | every public type (options, columns, data sources, events): the API, documented |
+| `grid.ts` | `createGrid` and the `Grid` class: options, the public query format, rebuilds |
+| `query.ts` | the query in its public and internal formats, and request signatures |
+| `sources/` | `createArraySource` (in memory) and `createHttpSource` (the reference protocol) |
+| `model/` | what the engine draws: the `GridModel` contract, the table and pivot models |
+| `axes/` | item index ↔ pixel offset: uniform, resizable, and tree axes (pivots) |
+| `engine/engine.ts` | `GridEngine`: scrolling, rendering, selection, keyboard, data requests |
+| `engine/*` | the engine's parts: cache and cache keys, header / merge / selection layers, filter dialog, clipboard, notices |
+| `grid.css` | styles (published as `@borealjs/grid-core/style.css`) |
+
+Pure logic (axes, merges, selection geometry, clipboard formats, models) is unit-tested without a DOM in
+`test/units.test.mjs`; prefer adding logic there rather than in the engine.
+
 ## Pull requests
 
 - Keep each pull request to one change, and add a test when you fix a bug or add an option.
-- When you change the public API, update `index.d.ts` and the package README in the same pull request.
+- The published types are generated from the source. When you change the public API, document it in
+  `src/types.ts`, add a case to `test/types/usage.tsx`, and update the package README in the same pull request.
 - Run `npm test` and `npm run typecheck` before you push; CI runs both on Node 20, 22 and 24.
 
 ## Releases

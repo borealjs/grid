@@ -1,4 +1,4 @@
-// Item axis for a hierarchy (pivot rows or columns). Shared by the browser and the server.
+// Item axis for a hierarchy (pivot rows or columns). Shared by the browser and the demo server.
 //
 // The axis is a flat sequence of items in depth-first order:
 //   group 0 › group 0.0 › leaves…, [subtotal 0.0], group 0.1 › …, [subtotal 0], group 1 › …, [grand total]
@@ -19,28 +19,54 @@
 // billions of leaves. Lookups descend the tree: O(depth · log fan-out). Changing the collapse state
 // relayouts in O(groups).
 
-/** Largest index in [lo, hi] whose value is <= v (assumes arr[lo] <= v). */
-export function lastLE(arr, lo, hi, v) {
-  while (lo < hi) {
-    const mid = lo + Math.ceil((hi - lo) / 2);
-    if (arr[mid] <= v) lo = mid;
-    else hi = mid - 1;
-  }
-  return lo;
-}
+import type { TreeLevel, TreeSpec } from '../types.js';
+import { lastLE } from '../util.js';
+import type { Axis } from './axis.js';
 
-export class TreeAxis {
-  /**
-   * @param {object} spec
-   * @param {{name: string, subtotal?: boolean, subtotalSize?: number}[]} spec.levels group levels, outermost first
-   * @param {number} spec.roots number of groups at level 0
-   * @param {(number | number[])[]} spec.fanout per level: children per group (a number = same for every group);
-   *   for the deepest level this is the number of leaves per group
-   * @param {number} spec.leafSize pixel size of a leaf item
-   * @param {boolean} [spec.grandTotal]
-   * @param {number} [spec.grandSize]
-   */
-  constructor(spec) {
+export { lastLE };
+
+/** What a visible (or source) item is. `path` holds the group index at each level down to the item's group. */
+export type TreeLocation =
+  | { kind: 'grand'; level: -1; path: number[] }
+  | { kind: 'collapsed'; level: number; path: number[] }
+  | { kind: 'subtotal'; level: number; path: number[] }
+  | { kind: 'leaf'; level: number; path: number[]; leafInGroup: number; leaf: number };
+
+export class TreeAxis implements Axis {
+  readonly depth: number;
+  readonly levels: TreeLevel[];
+  readonly leafSize: number;
+  /** Per level: whether its groups end with a subtotal item, and that item's size. */
+  readonly sub: boolean[];
+  readonly subSize: number[];
+  readonly grandTotal: boolean;
+  readonly grandSize: number;
+  /** Per level: number of groups. */
+  readonly cnt: number[];
+  /** Per level: childStart[L][g] .. childStart[L][g + 1] are group g's children (groups of L + 1, or leaves). */
+  readonly childStart: Float64Array[];
+  readonly leafCount: number;
+  /** Per level and group: 1 when collapsed (by the user) / hidden (inside a collapsed group). */
+  readonly collapsed: Uint8Array[];
+  readonly hidden: Uint8Array[];
+  readonly minSize: number;
+
+  // Current layout (visible index space).
+  items!: Float64Array[];
+  px!: Float64Array[];
+  itemStart!: Float64Array[];
+  pxStart!: Float64Array[];
+  grandIndex = -1;
+  count = 0;
+  total = 0;
+
+  // Fully expanded layout (source index space).
+  readonly fullItemStart: Float64Array[];
+  readonly fullItems: Float64Array[];
+  readonly fullCount: number;
+  readonly fullGrandIndex: number;
+
+  constructor(spec: TreeSpec) {
     const { levels, roots, fanout, leafSize, grandTotal = false, grandSize = leafSize } = spec;
     const D = levels.length;
     if (D < 1 || fanout.length !== D) throw new Error('TreeAxis: need one fanout entry per level');
@@ -53,8 +79,8 @@ export class TreeAxis {
     this.grandSize = this.grandTotal ? grandSize : 0;
 
     // Group counts and child ranges per level.
-    this.cnt = new Array(D);
-    this.childStart = new Array(D);
+    this.cnt = new Array<number>(D);
+    this.childStart = new Array<Float64Array>(D);
     this.cnt[0] = roots;
     for (let L = 0; L < D; L++) {
       const n = this.cnt[L];
@@ -90,38 +116,38 @@ export class TreeAxis {
   // ---------------------------------------------------------------- collapse state
 
   /** Only levels with subtotals can collapse: the collapsed item shows the subtotal's values. */
-  canCollapse(level) {
+  canCollapse(level: number): boolean {
     return level >= 0 && level < this.depth && this.sub[level];
   }
 
-  isCollapsed(level, group) {
+  isCollapsed(level: number, group: number): boolean {
     return this.collapsed[level][group] === 1;
   }
 
-  setCollapsed(level, group, value) {
+  setCollapsed(level: number, group: number, value: boolean): void {
     if (!this.canCollapse(level)) return;
     this.collapsed[level][group] = value ? 1 : 0;
     this.#layout();
   }
 
-  toggle(level, group) {
+  toggle(level: number, group: number): void {
     this.setCollapsed(level, group, !this.isCollapsed(level, group));
   }
 
   /** Expand everything above `level` and collapse every group at `level`. */
-  showLevel(level) {
+  showLevel(level: number): void {
     for (const c of this.collapsed) c.fill(0);
     if (this.canCollapse(level)) this.collapsed[level].fill(1);
     this.#layout();
   }
 
-  expandAll() {
+  expandAll(): void {
     for (const c of this.collapsed) c.fill(0);
     this.#layout();
   }
 
   /** Collapse exactly the (collapsible) groups for which pred(level, group) is true, with one relayout. */
-  setCollapsedWhere(pred) {
+  setCollapsedWhere(pred: (level: number, group: number) => boolean): void {
     for (let L = 0; L < this.depth; L++) {
       const can = this.canCollapse(L);
       const flags = this.collapsed[L];
@@ -131,16 +157,16 @@ export class TreeAxis {
   }
 
   /** Visible index of a group's first item (its collapsed item when collapsed), or -1 if it is hidden. */
-  groupStart(level, group) {
+  groupStart(level: number, group: number): number {
     return this.hidden[level][group] ? -1 : this.itemStart[level][group];
   }
 
-  #layout() {
+  #layout(): void {
     const D = this.depth;
     const leafSize = this.leafSize;
     // Bottom-up: item count and pixel size of every group (including its subtotal).
-    this.items = new Array(D);
-    this.px = new Array(D);
+    this.items = new Array<Float64Array>(D);
+    this.px = new Array<Float64Array>(D);
     for (let L = D - 1; L >= 0; L--) {
       const n = this.cnt[L];
       const cs = this.childStart[L];
@@ -176,8 +202,8 @@ export class TreeAxis {
 
     // Top-down: absolute first item index and pixel offset of every group. Groups inside a collapsed or
     // hidden group are hidden; they get their parent's start so each level stays sorted.
-    this.itemStart = new Array(D);
-    this.pxStart = new Array(D);
+    this.itemStart = new Array<Float64Array>(D);
+    this.pxStart = new Array<Float64Array>(D);
     let s = 0;
     let p = 0;
     this.itemStart[0] = new Float64Array(this.cnt[0]);
@@ -222,13 +248,13 @@ export class TreeAxis {
 
   /**
    * What visible item `i` is: a leaf, a subtotal closing a group at `level`, a collapsed group at
-   * `level`, or the grand total. `path` holds the group index at each level down to the item's group.
+   * `level`, or the grand total.
    */
-  locate(i) {
+  locate(i: number): TreeLocation {
     return this.#descend(i, this.itemStart, this.items, true);
   }
 
-  #descend(i, starts, items, collapseAware) {
+  #descend(i: number, starts: Float64Array[], items: Float64Array[], collapseAware: boolean): TreeLocation {
     if (this.grandTotal && i >= (collapseAware ? this.grandIndex : this.fullGrandIndex)) return { kind: 'grand', level: -1, path: [] };
     const D = this.depth;
     let n = lastLE(starts[0], 0, this.cnt[0] - 1, i);
@@ -247,7 +273,7 @@ export class TreeAxis {
     }
   }
 
-  offsetOf(i) {
+  offsetOf(i: number): number {
     if (i >= this.count) return this.total;
     if (i <= 0) return 0;
     const loc = this.locate(i);
@@ -258,14 +284,14 @@ export class TreeAxis {
     return this.pxStart[this.depth - 1][n] + loc.leafInGroup * this.leafSize;
   }
 
-  sizeOf(i) {
+  sizeOf(i: number): number {
     const loc = this.locate(i);
     if (loc.kind === 'grand') return this.grandSize;
     if (loc.kind === 'subtotal' || loc.kind === 'collapsed') return this.subSize[loc.level];
     return this.leafSize;
   }
 
-  indexAt(px) {
+  indexAt(px: number): number {
     if (this.count === 0 || px <= 0) return 0;
     if (px >= this.total) return this.count - 1;
     if (this.grandTotal && px >= this.total - this.grandSize) return this.grandIndex;
@@ -286,7 +312,7 @@ export class TreeAxis {
   }
 
   /** Calls fn(group, firstItem, lastItem) for every visible group at `level` overlapping items [a, b]. */
-  forEachGroup(level, a, b, fn) {
+  forEachGroup(level: number, a: number, b: number, fn: (group: number, first: number, last: number) => void): void {
     const st = this.itemStart[level];
     const it = this.items[level];
     const hid = this.hidden[level];
@@ -305,7 +331,7 @@ export class TreeAxis {
   // ---------------------------------------------------------------- visible <-> source
 
   /** Source (fully expanded) index of visible item `i`. A collapsed group maps to its subtotal. */
-  sourceOf(i) {
+  sourceOf(i: number): number {
     const loc = this.locate(i);
     if (loc.kind === 'grand') return this.fullGrandIndex;
     const n = loc.path[loc.path.length - 1];
@@ -318,7 +344,7 @@ export class TreeAxis {
    * collapse/expand: a collapsed group is anchored at its first source item (so expanding it keeps
    * the group's start in place), anything else at its own source item.
    */
-  anchorSourceOf(i) {
+  anchorSourceOf(i: number): number {
     const loc = this.locate(i);
     if (loc.kind === 'collapsed') return this.fullItemStart[loc.level][loc.path[loc.path.length - 1]];
     return this.sourceOf(i);
@@ -329,7 +355,7 @@ export class TreeAxis {
    * collapsed item if `containing` is true; otherwise -1 (unless `f` is the group's own subtotal,
    * which the collapsed item stands for).
    */
-  fromSource(f, containing = false) {
+  fromSource(f: number, containing = false): number {
     const loc = this.#descend(f, this.fullItemStart, this.fullItems, false);
     if (loc.kind === 'grand') return this.grandIndex;
     const { path } = loc;

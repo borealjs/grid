@@ -1,4 +1,7 @@
-// Type definitions for @borealjs/grid-core
+// Public types of @borealjs/grid-core: the query format, data sources, columns, options and events.
+// Everything here is part of the stable API. Internal shapes live next to the code that uses them.
+
+import type { Grid } from './grid.js';
 
 // ------------------------------------------------------------------ query
 
@@ -16,8 +19,11 @@ export type FilterCondition =
   | { op: 'contains'; text: string }
   | { op: string; value?: unknown };
 
+/** Which column a filter applies to: a source index or key, or a pivot row dimension (`level`). */
+export type FilterTargetRef = { column: number; key?: string } | { key: string; column?: number } | { level: number };
+
 /** A row filter on a column (by source index or key) or a pivot row dimension (`level`). */
-export type FilterItem = FilterCondition & ({ column: number; key?: string } | { key: string; column?: number } | { level: number });
+export type FilterItem = FilterCondition & FilterTargetRef;
 
 /** Which columns are shown: on column groups (tables, level 0) or column dimensions (pivots). */
 export type ColumnFilterItem = FilterCondition & { level: number };
@@ -27,8 +33,6 @@ export interface Query {
   filter: FilterItem[];
   columnFilter: ColumnFilterItem[];
 }
-
-export const EMPTY_QUERY: Readonly<Query>;
 
 // ------------------------------------------------------------------ data source
 
@@ -40,7 +44,7 @@ export interface CellRect {
   colCount: number;
 }
 
-/** A merged cell: rows and columns as in CellRect. */
+/** A merged cell: rows and columns as in CellRect (source coordinates). */
 export interface Merge {
   r0: number;
   c0: number;
@@ -52,6 +56,7 @@ export interface Merge {
 /** Values of one rect: rows of values (`[[a, b], [c, d]]`) or one row-major array (`[a, b, c, d]`). */
 export type RectValues<V = unknown> = V[][] | V[];
 
+/** What getCells returns: one RectValues per requested rect, optionally with merged cells. */
 export type CellsResult<V = unknown> = RectValues<V>[] | { cells: RectValues<V>[]; merges?: Merge[] };
 
 export interface TableLayout {
@@ -67,14 +72,21 @@ export interface TableLayout {
   [extra: string]: unknown;
 }
 
+export interface TreeLevel {
+  name: string;
+  subtotal?: boolean;
+  subtotalSize?: number;
+  collapsible?: boolean;
+}
+
 /** Hierarchical axis (pivot rows or columns). */
 export interface TreeSpec {
-  levels: { name: string; subtotal?: boolean; subtotalSize?: number; collapsible?: boolean }[];
+  levels: TreeLevel[];
   leafName: string;
   leafSize: number;
   roots: number;
-  /** Per level, the number of children of each group. */
-  fanout: number[][];
+  /** Per level, children per group: one number for every group, or one entry per group. */
+  fanout: (number | number[])[];
   grandTotal?: boolean;
   grandSize?: number;
 }
@@ -118,23 +130,46 @@ export interface FilterValuesResult {
   matches?: number;
 }
 
+export interface GetCellsRequest {
+  rects: CellRect[];
+  query: Query;
+  signal?: AbortSignal;
+}
+
+export interface GetLayoutRequest {
+  query: Query;
+  signal?: AbortSignal;
+  onProgress?(progress: Progress): void;
+}
+
+export interface GetLabelsRequest {
+  axis: 'rows' | 'cols';
+  level: number;
+  start: number;
+  count: number;
+  query: Query;
+  signal?: AbortSignal;
+}
+
+type MaybePromise<T> = T | Promise<T>;
+
 /**
  * Where the data comes from. Only getCells is required. The grid asks only for what is on screen; every
  * call gets an AbortSignal (pass it to fetch so requests that are no longer needed are cancelled).
  */
 export interface DataSource<V = unknown> {
   /** Cells of one or more rects. */
-  getCells(request: { rects: CellRect[]; query: Query; signal?: AbortSignal }): Promise<CellsResult<V>> | CellsResult<V>;
+  getCells(request: GetCellsRequest): MaybePromise<CellsResult<V>>;
   /**
    * Row count (tables) or the row/column trees (pivots) for a query. Needed for filtering and pivots.
    * A slow sort or filter may report how far it is with onProgress; the grid shows it with a Cancel button,
    * and cancelling aborts `signal`.
    */
-  getLayout?(request: { query: Query; signal?: AbortSignal; onProgress?(progress: Progress): void }): Promise<Layout> | Layout;
+  getLayout?(request: GetLayoutRequest): MaybePromise<Layout>;
   /** Header labels for very large axes (pivot groups, column titles not given in column definitions). */
-  getLabels?(request: { axis: 'rows' | 'cols'; level: number; start: number; count: number; query: Query; signal?: AbortSignal }): Promise<(string | null)[]> | (string | null)[];
+  getLabels?(request: GetLabelsRequest): MaybePromise<(string | null)[]>;
   /** Distinct values for value-list filters (first `limit` matching `search`). */
-  getFilterValues?(request: FilterValuesRequest): Promise<FilterValuesResult> | FilterValuesResult;
+  getFilterValues?(request: FilterValuesRequest): MaybePromise<FilterValuesResult>;
   /** In-memory sources: the record at a position of the sorted / filtered view (gives cells ctx.row). */
   rowAt?(position: number, query: Query): unknown;
   /** Rects per getCells call (default 400; 1 = one rect per call). */
@@ -146,7 +181,7 @@ export interface DataSource<V = unknown> {
 // ------------------------------------------------------------------ columns and hooks
 
 export interface CellContext<V = unknown> {
-  /** Visible row / column index. */
+  /** Visible row / column index (-1 when the cell is not on screen, e.g. while copying). */
   rowIndex: number;
   colIndex: number;
   /** The data record behind the row, when the data source can tell (in-memory rows); otherwise undefined. */
@@ -177,6 +212,11 @@ export interface HeaderContext {
   filtered: boolean;
 }
 
+export interface EmptyContext {
+  /** True when rows exist but none match the filter. */
+  filtered: boolean;
+}
+
 /** Imperative renderer: draw into `el`; return a cleanup to undo it (otherwise the grid empties `el`). */
 export type Renderer<C> = (el: HTMLElement, ctx: C) => void | (() => void);
 
@@ -202,7 +242,9 @@ export interface CustomFilter {
 
 export type FilterKind = false | 'text' | 'number' | 'date' | 'values' | { type: 'values'; values?: string[] } | CustomFilter;
 
-export interface ColumnDef<V = unknown> {
+export type CellClassResult = string | undefined | null | false;
+
+export interface ColumnDef<V = unknown, Row = any> {
   /** Stable id: used in queries and events (`key`) and by the in-memory source as the field name. */
   key?: string;
   title?: string;
@@ -219,16 +261,20 @@ export interface ColumnDef<V = unknown> {
   /** Value -> text shown in the cell (fastest way to customize a cell). */
   format?(value: V, ctx: CellContext<V> | null): string;
   /** Extra CSS class for a cell from its value. */
-  cellClass?(value: V, ctx: CellContext<V> | null): string | undefined | null | false;
+  cellClass?(value: V, ctx: CellContext<V> | null): CellClassResult;
   className?: string;
   headerClass?: string;
   renderCell?: Renderer<CellContext<V>>;
   renderHeader?: Renderer<HeaderContext>;
   /** In-memory source: read the value from a row (default row[key]). */
-  value?(row: any): V;
+  value?(row: Row): V;
   /** In-memory source: compare two values for sorting. */
   compare?(a: V, b: V): number;
 }
+
+// ------------------------------------------------------------------ texts
+
+export type ViewWork = 'sort' | 'filter' | 'columns';
 
 export interface Messages {
   noRows: string;
@@ -255,7 +301,7 @@ export interface Messages {
   applying: string;
   cancel: string;
   /** A sort or filter that takes a while: "Filtering… Checking rows · 42% · 7 s". */
-  working(what: 'sort' | 'filter' | 'columns', progress: Progress | null, seconds: number): string;
+  working(what: ViewWork, progress: Progress | null, seconds: number): string;
   filterLimit(limit: number, total: number): string;
   sortLimit(limit: number, total: number): string;
   failed(what: 'sort' | 'filter', reason: string): string;
@@ -269,19 +315,27 @@ export interface Messages {
   copyAgain(loaded: number, shortcut: string): string;
 }
 
-export const DEFAULT_MESSAGES: Messages;
-
 // ------------------------------------------------------------------ events
 
-export interface SelectionRange { r0: number; c0: number; r1: number; c1: number }
+export interface CellPosition {
+  r: number;
+  c: number;
+}
+
+export interface SelectionRange {
+  r0: number;
+  c0: number;
+  r1: number;
+  c1: number;
+}
 
 export interface Selection {
-  active: { r: number; c: number };
+  active: CellPosition;
   ranges: SelectionRange[];
 }
 
 export interface SelectionInfo {
-  active: { r: number; c: number };
+  active: CellPosition;
   /** Text of the active cell (undefined while loading). */
   text: string | undefined;
   ranges: number;
@@ -302,6 +356,8 @@ export interface CopyInfo {
   reason?: string;
   retry?: boolean;
   plainOnly?: boolean;
+  /** Why the clipboard refused, when it did. */
+  cause?: string;
 }
 
 export interface ViewChangeInfo {
@@ -311,7 +367,7 @@ export interface ViewChangeInfo {
   ok?: boolean;
   /** The user (or grid.cancel()) stopped it. */
   cancelled?: boolean;
-  what: 'sort' | 'filter' | 'columns';
+  what: ViewWork;
   reason?: string;
   rows?: number;
   cols?: number;
@@ -321,12 +377,38 @@ export interface ViewChangeInfo {
   droppedSorts?: number;
 }
 
+export interface ColumnResizeInfo {
+  column: number;
+  key?: string;
+  width: number;
+}
+
+export interface ErrorContext {
+  kind: 'layout' | 'cells' | 'labels';
+}
+
 // ------------------------------------------------------------------ options
 
 /** What a sortable rule is asked about: a column, or a pivot row level. */
 export type SortTarget = { axis: 'cols'; column: number; key?: string } | { axis: 'rows'; level: number };
 /** What a filterable rule is asked about: a column, a pivot row level, or a column level (pivot dimensions; the column chooser is level 0). */
 export type FilterTarget = SortTarget | { axis: 'cols'; level: number };
+
+export type SelectionMode = 'multi' | 'single' | 'none';
+export type Theme = 'auto' | 'light' | 'dark';
+
+export interface RowHeaderOptions {
+  width?: number;
+  title?: string;
+  label?(row: number): string;
+}
+
+/** Which parts of the query the owner controls (on…Change only reports; apply with setSort etc.). */
+export interface ControlledParts {
+  sort?: boolean;
+  filter?: boolean;
+  columnFilter?: boolean;
+}
 
 export interface GridOptions<V = unknown> {
   dataSource: DataSource<V>;
@@ -343,13 +425,13 @@ export interface GridOptions<V = unknown> {
   columnWidth?: number;
   minColumnWidth?: number;
   /** Row-number column: false hides it; label(row) customizes it. */
-  rowHeader?: false | { width?: number; title?: string; label?(row: number): string };
+  rowHeader?: false | RowHeaderOptions;
   /** Pivot row header column widths. */
   rowHeaderWidths?: number[];
   /** Column chooser on the corner (choose columns by `group`). Default: on when columns have groups. */
   columnChooser?: boolean;
   columnGroups?: string[];
-  theme?: 'auto' | 'light' | 'dark';
+  theme?: Theme;
   /** Accessible name of the grid, read by screen readers. */
   ariaLabel?: string;
   messages?: Partial<Messages>;
@@ -362,7 +444,7 @@ export interface GridOptions<V = unknown> {
   filterable?: boolean | ((target: FilterTarget) => boolean);
   resizable?: boolean;
   expandable?: boolean;
-  selection?: 'multi' | 'single' | 'none';
+  selection?: SelectionMode;
   copy?: boolean;
   keyboard?: boolean;
   /** Built-in notice for refused or failed sorts and filters (turn off if you show onViewChange yourself). */
@@ -376,16 +458,16 @@ export interface GridOptions<V = unknown> {
   defaultFilter?: FilterItem[];
   defaultColumnFilter?: ColumnFilterItem[];
   /** Controlled parts only report user changes (on…Change); apply them with setSort etc. */
-  controlled?: { sort?: boolean; filter?: boolean; columnFilter?: boolean };
+  controlled?: ControlledParts;
 
   // Grid-wide hooks (columns can override them)
   format?(value: V, ctx: CellContext<V> | null): string;
-  cellClass?(value: V, ctx: CellContext<V> | null): string | undefined | null | false;
+  cellClass?(value: V, ctx: CellContext<V> | null): CellClassResult;
   rowClass?(row: number): string | undefined;
   renderCell?: Renderer<CellContext<V>>;
   renderHeader?: Renderer<HeaderContext>;
   /** Draws the empty state (no rows, or none matching the filter). */
-  renderEmpty?: Renderer<{ filtered: boolean }>;
+  renderEmpty?: Renderer<EmptyContext>;
 
   // Events
   onSortChange?(sort: SortItem[]): void;
@@ -393,122 +475,58 @@ export interface GridOptions<V = unknown> {
   onColumnFilterChange?(columnFilter: ColumnFilterItem[]): void;
   onSelectionChange?(info: SelectionInfo): void;
   onCopy?(info: CopyInfo): void;
-  onColumnResize?(info: { column: number; key?: string; width: number }): void;
+  onColumnResize?(info: ColumnResizeInfo): void;
   onViewChange?(info: ViewChangeInfo): void;
-  onError?(error: unknown, context: { kind: 'layout' | 'cells' | 'labels' }): void;
+  onError?(error: unknown, context: ErrorContext): void;
   onReady?(grid: Grid): void;
 
-  /** Low-level: a custom layout model. May change in any release. */
+  // Tuning (rarely needed)
+  /** Rows / columns per cached data block (default 100 × 20). */
+  blockRows?: number;
+  blockCols?: number;
+  /** Use ⌘ (true) or Ctrl (false) for shortcuts; detected from the platform by default. */
+  isMac?: boolean;
+
+  /** Low-level: a custom layout model (see GridModel). May change in any release. */
   model?: unknown;
 }
 
-// ------------------------------------------------------------------ grid
+// ------------------------------------------------------------------ grid state
 
-export declare class Grid {
-  /** Resolves when the first layout is in and the grid is drawn. */
-  ready: Promise<void>;
-  readonly options: GridOptions;
-  /** Low-level access to the grid's internals. May change in any release. */
-  readonly engine: VirtualGrid | undefined;
-  readonly rowCount: number;
-  readonly columnCount: number;
-  readonly visibleRange: { firstRow: number; lastRow: number; firstCol: number; lastCol: number } | undefined;
-  /** Pivot levels (undefined for tables). */
-  readonly levels: { rows: { name: string; collapsible: boolean }[]; cols: { name: string; collapsible: boolean }[] } | undefined;
-
-  setOptions(options: Partial<GridOptions>): Promise<void>;
-  rebuild(): Promise<void>;
-
-  getQuery(): Query;
-  getSort(): SortItem[];
-  getFilter(): FilterItem[];
-  getColumnFilter(): ColumnFilterItem[];
-  setSort(sort: SortItem[]): Promise<boolean>;
-  setFilter(filter: FilterItem[]): Promise<boolean>;
-  setColumnFilter(columnFilter: ColumnFilterItem[]): Promise<boolean>;
-  toggleSort(column: number | string, additive?: boolean): Promise<boolean>;
-  openFilter(target: number | string | { level: number } | { columnLevel: number }): void;
-  closeFilter(): void;
-  /** Stop a sort or filter that is still being applied. Returns false when none is running. */
-  cancel(): boolean;
-
-  refresh(): Promise<void>;
-  repaint(): void;
-  setMerges(merges: Merge[]): void;
-
-  scrollToCell(row: number, col?: number): void;
-  getSelection(): Selection | undefined;
-  setSelection(selection: { active?: { r: number; c: number }; ranges?: SelectionRange[] }): void;
-  selectAll(): void;
-  selectionInfo(): SelectionInfo | undefined;
-  copySelection(): Promise<CopyInfo>;
-  cellValue(row: number, col: number): unknown;
-  cellText(row: number, col: number): string | undefined;
-  setColumnWidth(col: number, width: number): void;
-  focus(): void;
-
-  toggleGroup(axis: 'rows' | 'cols', level: number, group: number): void;
-  showLevel(axis: 'rows' | 'cols', level: number): void;
-  expandAll(axis: 'rows' | 'cols'): void;
-
-  stats(): unknown;
-  destroy(): void;
+export interface VisibleRange {
+  firstRow: number;
+  lastRow: number;
+  firstCol: number;
+  lastCol: number;
 }
 
-export function createGrid<V = unknown>(host: HTMLElement, options: GridOptions<V>): Grid;
-
-// ------------------------------------------------------------------ sources
-
-export interface ArraySource<R = any> extends DataSource {
-  readonly rows: R[];
-  /** Replace the rows; then call grid.refresh(). */
-  setRows(rows: R[]): void;
+export interface PivotLevel {
+  name: string;
+  collapsible: boolean;
 }
 
-export function createArraySource<R = any>(
-  rows: R[],
-  options?: {
-    columns?: (ColumnDef | string | number)[];
-    filterFns?: Record<string, (value: unknown, conditionValue: unknown, row: R) => boolean>;
-    compare?(a: unknown, b: unknown): number;
-  },
-): ArraySource<R>;
+export interface PivotLevels {
+  rows: PivotLevel[];
+  cols: PivotLevel[];
+}
 
-export function createHttpSource(options?: {
-  baseUrl?: string;
-  params?: Record<string, string | number | boolean | undefined | null>;
-  fetch?: typeof fetch;
-  headers?: Record<string, string>;
-}): DataSource<string>;
+/** Render and cache counters, for profiling (grid.stats()). The shape may grow in later releases. */
+export interface GridStats {
+  renders: number;
+  renderMsEma: number;
+  /** Slowest frame since the last stats() call. */
+  renderMsMax: number;
+  rowWrites: number;
+  cellWrites: number;
+  cache: CacheStats & { cached: number; inflight: number; queued: number };
+}
 
-export function compareValues(a: unknown, b: unknown): number;
-export function defaultFormat(value: unknown): string;
-
-// ------------------------------------------------------------------ low-level pieces (may change in any release)
-
-export declare class VirtualGrid {
-  constructor(host: HTMLElement, options: Record<string, unknown>);
-  [member: string]: any;
+export interface CacheStats {
+  requests: number;
+  gatherRequests: number;
+  gatherUnits: number;
+  cellsFetched: number;
+  aborted: number;
+  errors: number;
+  lastMs: number;
 }
-export declare class UniformAxis {
-  constructor(count: number, size: number);
-  count: number;
-  total: number;
-  offsetOf(i: number): number;
-  sizeOf(i: number): number;
-  indexAt(px: number): number;
-}
-export declare class ResizableAxis {
-  constructor(base: unknown);
-  [member: string]: any;
-}
-export declare class TreeAxis {
-  constructor(spec: TreeSpec);
-  [member: string]: any;
-}
-export declare class BlockCache {
-  constructor(options: Record<string, unknown>);
-  [member: string]: any;
-}
-export function createTableModel(options: GridOptions, layout: TableLayout, source: DataSource, initial?: { filter?: string; colfilter?: string }): unknown;
-export function createPivotModel(layout: PivotLayout, source: DataSource, options?: Partial<GridOptions>, initial?: { colfilter?: string }): unknown;

@@ -1,5 +1,5 @@
 // Demo of @borealjs/grid-core against the reference server (server.mjs): the grid only sees a data source.
-import { createGrid, createHttpSource, EMPTY_QUERY } from '../../packages/grid-core/src/index.js';
+import { createGrid, createHttpSource, EMPTY_QUERY } from '../../packages/grid-core/dist/index.js';
 
 const fmt = new Intl.NumberFormat('en-US');
 const parseCount = (s) => Number(String(s).replace(/[,_\s]/g, ''));

@@ -1,9 +1,9 @@
-// npm test   (node --test; no dependencies). The HTTP source test starts server.mjs on a free port.
+// npm test   (node --test, with tsx for the TypeScript sources). The public API is tested on the built bundle. The HTTP source test starts server.mjs on a free port.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createArraySource, createHttpSource, compareValues, EMPTY_QUERY } from '../packages/grid-core/src/index.js';
-import { sortFromPublic, sortToPublic, filterFromPublic, filterToPublic, columnFilterFromPublic, columnFilterToPublic } from '../packages/grid-core/src/query.js';
+import { createArraySource, createHttpSource, compareValues, EMPTY_QUERY } from '../packages/grid-core/dist/index.js';
+import { sortFromPublic, sortToPublic, filterFromPublic, filterToPublic, columnFilterFromPublic, columnFilterToPublic } from '../packages/grid-core/src/query.ts';
 
 const rows = [
   { id: 1, name: 'Item 10', city: 'Oslo', amount: 5, day: '2024-03-01' },

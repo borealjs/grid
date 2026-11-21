@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/@borealjs/grid-core)](https://www.npmjs.com/package/@borealjs/grid-core)
 [![Bundle size](https://deno.bundlejs.com/badge?q=@borealjs/grid-core)](https://bundlejs.com/?q=@borealjs/grid-core)
-[![Types](https://img.shields.io/npm/types/@borealjs/grid-core)](https://github.com/borealjs/grid/blob/main/packages/grid-core/index.d.ts)
+[![Types](https://img.shields.io/npm/types/@borealjs/grid-core)](https://github.com/borealjs/grid/blob/main/packages/grid-core/src/types.ts)
 [![License](https://img.shields.io/npm/l/@borealjs/grid-core)](https://github.com/borealjs/grid/blob/main/LICENSE)
 
 A data grid for the web that stays smooth at any size: thousands to billions of rows and up to millions of
@@ -565,6 +565,7 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `setMerges(merges)` | merged cells: `[{ r0, c0, nr, nc, label? }]` |
 | `rowCount`, `columnCount`, `visibleRange` | sizes and what is on screen |
 | `levels`, `showLevel(axis, level)`, `expandAll(axis)`, `toggleGroup(axis, level, group)` | pivots |
+| `stats()` | render and cache counters, for profiling |
 | `focus()`, `destroy()` | |
 
 ### Data source
@@ -576,6 +577,17 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `getFilterValues({ column, key, search, limit, query, signal })` | optional | `{ values, total?, matches? }` |
 | `getLabels({ axis, level, start, count, query, signal })` | optional | header titles you did not put in the columns |
 | `maxRectsPerRequest`, `maxCellsPerRequest` | optional | at most this many rects (default 400) or cells (default 20,000) per `getCells` call |
+
+### TypeScript
+
+Every option, callback and data source shape has a type, exported by name: `GridOptions`, `ColumnDef<Value, Row>`,
+`DataSource`, `Query`, `SortItem`, `FilterItem`, `CellContext`, `HeaderContext`, `SelectionInfo`, `GridStats` and
+more. They are generated from the source, so they always match the code. `createArraySource<Row>(rows)` types
+`setRows`, `rowAt` and each column's `value(row)`.
+
+The low-level pieces (`GridEngine`, `createTableModel`, `createPivotModel`, `GridModel`, the axes and `BlockCache`)
+are exported for custom layouts and tooling, and may change in any release. `GridEngine` was exported as
+`VirtualGrid` before 0.2; that name still works but is deprecated, since the React component has the same name.
 
 ## FAQ
 

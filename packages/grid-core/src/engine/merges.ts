@@ -11,39 +11,86 @@
 // (which stands for many source items) ends a run, so a merge that crosses a collapsed group is
 // split into a piece before it and a piece after it, and the collapsed row/column keeps its own value.
 
+import type { Merge } from '../types.js';
+
 const BUCKET = 1024; // rows per index bucket
 const LONG = 1024; // merges taller than this are kept in a separate list
 
-/** Accepts [r0, c0, nr, nc, label?] or { r0, c0, nr, nc, label? }; returns null for invalid or 1×1 merges. */
-export function normalizeMerge(raw, fromCode) {
-  const [r0, c0, nr, nc, label] = Array.isArray(raw) ? raw : [raw?.r0, raw?.c0, raw?.nr, raw?.nc, raw?.label];
-  if (![r0, c0, nr, nc].every(Number.isSafeInteger) || r0 < 0 || c0 < 0 || nr < 1 || nc < 1 || nr * nc < 2) return null;
+/** A merge as given: an object, or a tuple [r0, c0, nr, nc, label?] (the reference protocol). */
+export type RawMerge = Merge | [number, number, number, number, (string | null)?];
+
+/** A validated merge with its far edges and identity. */
+export interface MergeRecord {
+  r0: number;
+  c0: number;
+  nr: number;
+  nc: number;
+  r1: number;
+  c1: number;
+  label: string | undefined;
+  key: string;
+  /** Set from code (wins over server merges). */
+  code: boolean;
+}
+
+/** A merge's visible part between two collapsed items, in visible coordinates. */
+export interface MergePiece {
+  key: string;
+  merge: MergeRecord;
+  vr0: number;
+  vr1: number;
+  vc0: number;
+  vc1: number;
+  /** Text to show (undefined while the top-left cell is loading); filled in by the renderer. */
+  text?: string;
+}
+
+interface Run {
+  v0: number;
+  v1: number;
+  s0: number;
+  s1: number;
+}
+
+/** Validates a merge; returns null for invalid or 1×1 merges. */
+export function normalizeMerge(raw: unknown, fromCode: boolean): MergeRecord | null {
+  const m = raw as Partial<Merge> | null | undefined;
+  const [r0, c0, nr, nc, label] = (Array.isArray(raw) ? raw : [m?.r0, m?.c0, m?.nr, m?.nc, m?.label]) as unknown[];
+  if (![r0, c0, nr, nc].every(Number.isSafeInteger)) return null;
+  const [R0, C0, NR, NC] = [r0, c0, nr, nc] as number[];
+  if (R0 < 0 || C0 < 0 || NR < 1 || NC < 1 || NR * NC < 2) return null;
   return {
-    r0, c0, nr, nc,
-    r1: r0 + nr - 1,
-    c1: c0 + nc - 1,
+    r0: R0,
+    c0: C0,
+    nr: NR,
+    nc: NC,
+    r1: R0 + NR - 1,
+    c1: C0 + NC - 1,
     label: label === undefined || label === null ? undefined : String(label),
-    key: `${r0}:${c0}:${nr}:${nc}`,
-    code: !!fromCode,
+    key: `${R0}:${C0}:${NR}:${NC}`,
+    code: fromCode,
   };
 }
 
 /** Merges by source row range. Bucketed by start row; very tall merges live in a short separate list. */
 export class MergeIndex {
-  constructor({ maxServer = 200_000 } = {}) {
+  readonly maxServer: number;
+  readonly code = new Map<string, MergeRecord>();
+  /** Insertion order = age. */
+  readonly server = new Map<string, MergeRecord>();
+  readonly buckets = new Map<number, MergeRecord[]>();
+  readonly long = new Set<MergeRecord>();
+  version = 0;
+
+  constructor({ maxServer = 200_000 }: { maxServer?: number } = {}) {
     this.maxServer = maxServer;
-    this.code = new Map();
-    this.server = new Map(); // insertion order = age
-    this.buckets = new Map();
-    this.long = new Set();
-    this.version = 0;
   }
 
-  get size() {
+  get size(): number {
     return this.code.size + this.server.size;
   }
 
-  setCode(list) {
+  setCode(list: readonly unknown[] | null | undefined): void {
     for (const m of this.code.values()) this.#unindex(m);
     this.code.clear();
     for (const raw of list ?? []) {
@@ -55,7 +102,7 @@ export class MergeIndex {
     this.version++;
   }
 
-  addServer(list) {
+  addServer(list: readonly unknown[] | null | undefined): boolean {
     let added = false;
     for (const raw of list ?? []) {
       const m = normalizeMerge(raw, false);
@@ -65,7 +112,7 @@ export class MergeIndex {
       added = true;
     }
     while (this.server.size > this.maxServer) {
-      const [key, m] = this.server.entries().next().value;
+      const [key, m] = this.server.entries().next().value as [string, MergeRecord];
       this.server.delete(key);
       this.#unindex(m);
     }
@@ -73,8 +120,8 @@ export class MergeIndex {
     return added;
   }
 
-  /** Adds every merge whose rows intersect source rows [sa, sb] to `out` (Map key -> merge). */
-  query(sa, sb, out) {
+  /** Adds every merge whose rows intersect source rows [sa, sb] to `out` (key -> merge). */
+  query(sa: number, sb: number, out: Map<string, MergeRecord>): Map<string, MergeRecord> {
     const first = Math.floor((sa - LONG + 1) / BUCKET);
     const last = Math.floor(sb / BUCKET);
     for (let b = first; b <= last; b++) {
@@ -86,7 +133,7 @@ export class MergeIndex {
     return out;
   }
 
-  #index(m) {
+  #index(m: MergeRecord): void {
     if (m.nr > LONG) {
       this.long.add(m);
       return;
@@ -97,7 +144,7 @@ export class MergeIndex {
     list.push(m);
   }
 
-  #unindex(m) {
+  #unindex(m: MergeRecord): void {
     if (this.long.delete(m)) return;
     const b = Math.floor(m.r0 / BUCKET);
     const list = this.buckets.get(b);
@@ -111,10 +158,9 @@ export class MergeIndex {
 /**
  * Runs of visible items starting at visible index `from`: each run is consecutive visible items that
  * show exactly one source item (exact[k] = 1) and whose sources are consecutive.
- * @returns {{v0: number, v1: number, s0: number, s1: number}[]}
  */
-export function exactRuns(from, src, exact) {
-  const runs = [];
+export function exactRuns(from: number, src: ArrayLike<number>, exact: ArrayLike<number>): Run[] {
+  const runs: Run[] = [];
   const n = src.length;
   let k = 0;
   while (k < n) {
@@ -131,8 +177,8 @@ export function exactRuns(from, src, exact) {
 }
 
 /** Visible pieces of source range [a, b] along one axis: one per run it intersects. */
-export function axisPieces(runs, a, b) {
-  const out = [];
+export function axisPieces(runs: readonly Run[], a: number, b: number): { v0: number; v1: number; s0: number }[] {
+  const out: { v0: number; v1: number; s0: number }[] = [];
   for (const run of runs) {
     const s0 = Math.max(run.s0, a);
     const s1 = Math.min(run.s1, b);
@@ -145,22 +191,30 @@ export function axisPieces(runs, a, b) {
  * Visible pieces of all merges that touch the drawn window, plus a coverage bitmap of the window.
  * Pieces are taken in priority order; a piece overlapping cells already covered is dropped.
  *
- * @param {MergeIndex} index
- * @param {number} r0 first visible row of the window; rowSrc/rowExact describe rows r0.. (length N)
- * @param {number} c0 first visible column of the window; colSrc/colExact describe columns c0.. (length M)
- * @param {Uint8Array} cover N×M output, 1 where a cell is under a merge piece
+ * @param r0 first visible row of the window; rowSrc/rowExact describe rows r0.. (length N)
+ * @param c0 first visible column of the window; colSrc/colExact describe columns c0.. (length M)
+ * @param cover N×M output, 1 where a cell is under a merge piece
  */
-export function mergePieces(index, r0, rowSrc, rowExact, c0, colSrc, colExact, cover) {
+export function mergePieces(
+  index: MergeIndex,
+  r0: number,
+  rowSrc: ArrayLike<number>,
+  rowExact: ArrayLike<number>,
+  c0: number,
+  colSrc: ArrayLike<number>,
+  colExact: ArrayLike<number>,
+  cover: Uint8Array,
+): MergePiece[] {
   cover.fill(0);
-  const pieces = [];
+  const pieces: MergePiece[] = [];
   if (index.size === 0) return pieces;
   const M = colSrc.length;
   const rowRuns = exactRuns(r0, rowSrc, rowExact);
   const colRuns = exactRuns(c0, colSrc, colExact);
   if (rowRuns.length === 0 || colRuns.length === 0) return pieces;
-  const found = new Map();
+  const found = new Map<string, MergeRecord>();
   for (const run of rowRuns) index.query(run.s0, run.s1, found);
-  const merges = [...found.values()].sort((a, b) => (b.code - a.code) || a.r0 - b.r0 || a.c0 - b.c0);
+  const merges = [...found.values()].sort((a, b) => (Number(b.code) - Number(a.code)) || a.r0 - b.r0 || a.c0 - b.c0);
   for (const m of merges) {
     const rp = axisPieces(rowRuns, m.r0, m.r1);
     if (rp.length === 0) continue;
@@ -171,7 +225,12 @@ export function mergePieces(index, r0, rowSrc, rowExact, c0, colSrc, colExact, c
         let free = true;
         for (let r = pr.v0; r <= pr.v1 && free; r++) {
           const base = (r - r0) * M - c0;
-          for (let c = pc.v0; c <= pc.v1; c++) if (cover[base + c]) { free = false; break; }
+          for (let c = pc.v0; c <= pc.v1; c++) {
+            if (cover[base + c]) {
+              free = false;
+              break;
+            }
+          }
         }
         if (!free) continue;
         for (let r = pr.v0; r <= pr.v1; r++) cover.fill(1, (r - r0) * M + pc.v0 - c0, (r - r0) * M + pc.v1 - c0 + 1);
