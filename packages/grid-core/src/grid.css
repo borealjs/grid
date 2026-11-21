@@ -1,0 +1,424 @@
+/* @borealjs/grid-core styles. Theme with the --vg-* custom properties on .vg (or any ancestor via your own
+   selector), or pick a theme with the `theme` option: 'auto' (follows the OS), 'light' or 'dark'. */
+
+.vg {
+  --vg-bg: #ffffff;
+  --vg-fg: #1d2330;
+  --vg-muted: #6b7280;
+  --vg-line: #e4e7ec;
+  --vg-head: #f5f6f8;
+  --vg-zebra: #fafbfc;
+  --vg-ph: #e9ecf1;
+  --vg-accent: #2563eb;
+  --vg-field: #ffffff;
+  --vg-sub2: #f3f6fb;
+  --vg-sub1: #eaf0f9;
+  --vg-sub0: #dfe8f6;
+  --vg-grand: #d2def2;
+  --vg-merge: #fdf8ec;
+  --vg-merge-edge: #e4c77a;
+  --vg-sel-fill: rgba(37, 99, 235, 0.1);
+  --vg-sel-head: #e1eafc;
+
+  --vg-error: #b42318;
+  --vg-error-bg: #b42318;
+  --vg-font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  position: relative;
+  overflow: hidden;
+  background: var(--vg-bg);
+  color: var(--vg-fg);
+  font: var(--vg-font);
+}
+.vg.vg-dark {
+    --vg-bg: #14161b;
+    --vg-fg: #e6e8ec;
+    --vg-muted: #9aa3af;
+    --vg-line: #2a2e37;
+    --vg-head: #1b1e25;
+    --vg-zebra: #171a20;
+    --vg-ph: #262a34;
+    --vg-accent: #60a5fa;
+    --vg-field: #1b1e25;
+    --vg-sub2: #1a2029;
+    --vg-sub1: #1d2531;
+    --vg-sub0: #212b3a;
+    --vg-grand: #263347;
+    --vg-merge: #26231a;
+    --vg-merge-edge: #8a6d2a;
+    --vg-sel-fill: rgba(96, 165, 250, 0.16);
+    --vg-sel-head: #1e2b42;
+    --vg-error: #f97066;
+  }
+@media (prefers-color-scheme: dark) {
+  .vg.vg-auto {
+    --vg-bg: #14161b;
+    --vg-fg: #e6e8ec;
+    --vg-muted: #9aa3af;
+    --vg-line: #2a2e37;
+    --vg-head: #1b1e25;
+    --vg-zebra: #171a20;
+    --vg-ph: #262a34;
+    --vg-accent: #60a5fa;
+    --vg-field: #1b1e25;
+    --vg-sub2: #1a2029;
+    --vg-sub1: #1d2531;
+    --vg-sub0: #212b3a;
+    --vg-grand: #263347;
+    --vg-merge: #26231a;
+    --vg-merge-edge: #8a6d2a;
+    --vg-sel-fill: rgba(96, 165, 250, 0.16);
+    --vg-sel-head: #1e2b42;
+    --vg-error: #f97066;
+  }
+}
+
+/* Controls inside the grid (filter dialog) are styled here, not by the page. */
+.vg input, .vg select, .vg button {
+  font: inherit;
+  color: var(--vg-fg);
+  background: var(--vg-field);
+  border: 1px solid var(--vg-line);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.vg button { cursor: pointer; font-weight: 600; }
+.vg button:hover { border-color: var(--vg-accent); }
+.vg input[type="checkbox"] { padding: 0; }
+/* ------------------------------------------------------------------ grid frame */
+
+.vg-scroller {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  outline: none;
+}
+.vg-scroller:focus-visible { box-shadow: inset 0 0 0 2px var(--vg-accent); }
+.vg-content { position: relative; }
+.vg-viewport {
+  position: sticky;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  contain: strict;
+}
+.vg-body, .vg-colhead, .vg-rowhead, .vg-corner {
+  position: absolute;
+  overflow: hidden;
+  contain: strict;
+}
+.vg-body { top: var(--vg-head-h); left: var(--vg-rh-w); right: 0; bottom: 0; }
+.vg-colhead { top: 0; left: var(--vg-rh-w); right: 0; height: var(--vg-head-h); background: var(--vg-head); }
+.vg-rowhead { top: var(--vg-head-h); left: 0; bottom: 0; width: var(--vg-rh-w); background: var(--vg-head); }
+.vg-corner {
+  top: 0;
+  left: 0;
+  width: var(--vg-rh-w);
+  height: var(--vg-head-h);
+  background: var(--vg-head);
+  box-shadow: inset -1px -1px 0 var(--vg-line);
+}
+.vg-layer { position: absolute; top: 0; left: 0; will-change: transform; }
+
+/* ------------------------------------------------------------------ body */
+
+.vg-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  contain: layout style;
+}
+.vg-cell {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  box-sizing: border-box;
+  padding: 0 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid var(--vg-line);
+  border-bottom: 1px solid var(--vg-line);
+  contain: strict;
+}
+.vg-odd > .vg-cell { background: var(--vg-zebra); }
+.vg-pivot .vg-cell { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Pivot subtotals: column subtotals tint the column, row subtotals tint and bold the row. */
+.vg-cell.vg-sub2 { background: var(--vg-sub2); }
+.vg-cell.vg-sub1 { background: var(--vg-sub1); }
+.vg-cell.vg-sub0 { background: var(--vg-sub0); font-weight: 600; }
+.vg-row.vg-sub > .vg-cell { font-weight: 600; }
+.vg-row.vg-sub2 > .vg-cell { background: var(--vg-sub2); }
+.vg-row.vg-sub1 > .vg-cell { background: var(--vg-sub1); }
+.vg-row.vg-sub0 > .vg-cell { background: var(--vg-sub0); }
+.vg-row.vg-grand > .vg-cell { background: var(--vg-grand); font-weight: 700; }
+
+/* ------------------------------------------------------------------ headers */
+
+.vg-seg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  contain: strict;
+  background: var(--vg-head);
+  border-right: 1px solid var(--vg-line);
+  border-bottom: 1px solid var(--vg-line);
+}
+.vg-sl {
+  display: block;
+  padding: 0 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vg-colhead .vg-seg { font-weight: 600; }
+.vg-pivot .vg-colhead .vg-leaf { text-align: right; font-weight: 500; color: var(--vg-muted); }
+.vg-rownum { color: var(--vg-muted); text-align: right; font-variant-numeric: tabular-nums; }
+.vg-group { font-weight: 600; }
+.vg-seg.vg-sub2 { background: var(--vg-sub2); font-weight: 600; }
+.vg-seg.vg-sub1 { background: var(--vg-sub1); font-weight: 600; }
+.vg-seg.vg-sub0 { background: var(--vg-sub0); font-weight: 600; }
+.vg-seg.vg-grand { background: var(--vg-grand); font-weight: 700; }
+
+/* Merged cells: drawn over the cells they cover (those are hidden). */
+.vg-merge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  contain: strict;
+  background: var(--vg-merge);
+  border-right: 1px solid var(--vg-line);
+  border-bottom: 1px solid var(--vg-line);
+  box-shadow: inset 3px 0 0 var(--vg-merge-edge);
+  text-align: left;
+  font-weight: 500;
+}
+.vg-merge-code { box-shadow: inset 3px 0 0 var(--vg-accent); }
+.vg-ml {
+  display: block;
+  padding: 0 8px 0 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vg-merge.vg-ph .vg-ml { position: relative; min-height: 24px; }
+.vg-merge.vg-ph .vg-ml::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  width: 60%;
+  top: 50%;
+  height: 8px;
+  margin-top: -4px;
+  border-radius: 4px;
+  background: var(--vg-ph);
+}
+
+/* Selection */
+.vg-body { cursor: cell; user-select: none; -webkit-user-select: none; }
+.vg-sel-layer { pointer-events: none; }
+.vg-selbox {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  background: var(--vg-sel-fill);
+  border: 1px solid var(--vg-accent);
+}
+.vg-active {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  border: 2px solid var(--vg-accent);
+}
+.vg:not(:focus-within) .vg-active { border-color: var(--vg-muted); }
+.vg-seg.vg-sel { background: var(--vg-sel-head); color: var(--vg-accent); }
+.vg-corner { cursor: pointer; }
+.vg-colhead .vg-seg:not([data-toggle]), .vg-rowhead .vg-seg:not([data-toggle]) { cursor: default; }
+
+/* Sort controls: shown on hover, always shown (accent) when the column is sorted. */
+.vg-sortbtn {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1.2;
+  font-weight: 600;
+  color: var(--vg-muted);
+  cursor: pointer;
+  opacity: 0;
+  user-select: none;
+}
+.vg-sortbtn[hidden] { display: none; }
+.vg-seg:hover > .vg-sortbtn, .vg-cn:hover > .vg-sortbtn { opacity: 0.85; }
+.vg-sortbtn.vg-sort-on { opacity: 1; color: var(--vg-accent); }
+.vg-sortbtn:hover { background: var(--vg-sel-head); opacity: 1; }
+.vg-seg.vg-sortable > .vg-sl { padding-right: 28px; }
+.vg-cn.vg-sortable { padding-right: 28px; }
+
+/* Filter controls: a funnel left of the sort control; accent when a filter is set. */
+.vg-filterbtn {
+  position: absolute;
+  top: 50%;
+  right: 30px;
+  transform: translateY(-50%);
+  display: flex;
+  padding: 3px;
+  border-radius: 4px;
+  color: var(--vg-muted);
+  cursor: pointer;
+  opacity: 0;
+}
+.vg-filterbtn[hidden] { display: none; }
+.vg-seg:hover > .vg-filterbtn, .vg-cn:hover > .vg-filterbtn { opacity: 0.85; }
+.vg-filterbtn.vg-filter-on { opacity: 1; color: var(--vg-accent); }
+.vg-filterbtn:hover { background: var(--vg-sel-head); opacity: 1; }
+.vg-seg.vg-filterable > .vg-sl, .vg-cn.vg-filterable { padding-right: 50px; }
+
+.vg-empty {
+  position: absolute;
+  top: calc(var(--vg-head-h) + 24px);
+  left: var(--vg-rh-w);
+  right: 0;
+  text-align: center;
+  color: var(--vg-muted);
+  font-size: 14px;
+}
+.vg-empty[hidden] { display: none; }
+
+.vg-filter-pop {
+  position: absolute;
+  z-index: 20;
+  width: 260px;
+  max-width: calc(100% - 16px);
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid var(--vg-line);
+  border-radius: 8px;
+  background: var(--vg-bg);
+  color: var(--vg-fg);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+  font-weight: 400;
+}
+.vg-filter-title { font-weight: 600; margin-bottom: 10px; }
+.vg-filter-body { display: flex; flex-direction: column; gap: 8px; }
+.vg-filter-field { display: grid; grid-template-columns: 52px 1fr; align-items: center; gap: 8px; color: var(--vg-muted); }
+.vg-filter-field input { min-width: 0; }
+.vg-filter-tools { display: flex; gap: 6px; }
+.vg-filter-tools button { padding: 2px 10px; font-weight: 500; }
+.vg-filter-list {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--vg-line);
+  border-radius: 6px;
+  padding: 4px;
+}
+.vg-filter-option { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 4px; cursor: pointer; }
+.vg-filter-option:hover { background: var(--vg-sel-head); }
+.vg-filter-option[hidden] { display: none; }
+.vg-filter-list { min-height: 28px; }
+.vg-filter-note { color: var(--vg-muted); font-size: 12px; line-height: 1.35; max-width: 240px; }
+.vg-filter-note:empty { display: none; }
+.vg-filter-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.vg-filter-apply { background: var(--vg-accent); border-color: var(--vg-accent); color: #fff; }
+
+/* Expand/collapse targets */
+.vg-seg[data-toggle] { cursor: pointer; }
+.vg-seg[data-toggle]:hover { box-shadow: inset 0 0 0 1px var(--vg-accent); }
+.vg-seg.vg-collapsed { color: var(--vg-accent); }
+
+.vg-cn {
+  position: absolute;
+  left: 0;
+  box-sizing: border-box;
+  padding: 0 8px;
+  color: var(--vg-muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid var(--vg-line);
+  border-bottom: 1px solid var(--vg-line);
+}
+.vg-cn-tier { right: 0; text-align: right; border-right: 0; }
+
+.vg-grip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  display: none;
+}
+.vg-seg[data-item] > .vg-grip { display: block; }
+.vg-grip:hover { background: var(--vg-accent); opacity: 0.5; }
+
+/* Loading placeholders: a static bar, no animation (hundreds of animated cells would cost frames). */
+.vg-cell.vg-ph::after, .vg-seg.vg-ph .vg-sl::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 35%;
+  top: 50%;
+  height: 8px;
+  margin-top: -4px;
+  border-radius: 4px;
+  background: var(--vg-ph);
+}
+.vg-seg.vg-ph .vg-sl { position: relative; min-height: 28px; }
+
+/* Custom renderers draw into these boxes (React portals or plain DOM). */
+.vg-cbox { display: block; height: 100%; overflow: hidden; text-overflow: ellipsis; }
+.vg-cbox[hidden], .vg-hbox[hidden] { display: none; }
+.vg-hbox { display: inline; }
+
+/* Alignment from column definitions (type: 'number' aligns to the end). */
+.vg-cell.vg-end, .vg-seg.vg-end { text-align: right; font-variant-numeric: tabular-nums; }
+.vg-cell.vg-center { text-align: center; }
+
+/* selection: 'none' */
+.vg-nosel .vg-sel-layer { display: none; }
+.vg-nosel .vg-body { cursor: default; }
+
+/* Custom filter content area */
+.vg-filter-custom { display: flex; flex-direction: column; gap: 8px; }
+
+/* Filter dialog status (not available / applying / failed) */
+.vg-filter-status { margin-top: 10px; color: var(--vg-muted); font-size: 12px; line-height: 1.35; }
+.vg-filter-status:empty { display: none; }
+.vg-filter-status.vg-filter-error { color: var(--vg-error); }
+.vg .vg-filter-actions button:disabled { opacity: 0.5; cursor: default; }
+
+/* Notices (refused or failed sorts and filters) */
+.vg-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  z-index: 30;
+  max-width: min(520px, calc(100% - 32px));
+  transform: translate(-50%, 8px);
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--vg-fg);
+  color: var(--vg-bg);
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s, transform 0.15s;
+}
+.vg-notice-show { opacity: 1; transform: translate(-50%, 0); }
+.vg-notice-error { background: var(--vg-error-bg); color: #fff; }

@@ -1,0 +1,53 @@
+{
+  "name": "@borealjs/react-grid",
+  "version": "0.1.0",
+  "description": "React wrapper for @borealjs/grid-core: a virtual data grid for billions of rows, fed by async callbacks, with React cells, headers and filters.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/borealjs/grid.git",
+    "directory": "packages/react-grid"
+  },
+  "homepage": "https://github.com/borealjs/grid/tree/main/packages/react-grid#readme",
+  "bugs": {
+    "url": "https://github.com/borealjs/grid/issues"
+  },
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "dependencies": {
+    "@borealjs/grid-core": "0.1.0"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "keywords": [
+    "react",
+    "grid",
+    "datagrid",
+    "data-grid",
+    "table",
+    "virtual",
+    "pivot",
+    "server-side"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

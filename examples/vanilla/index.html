@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Virtual Grid</title>
+  <link rel="stylesheet" href="../../packages/grid-core/src/grid.css">
+  <link rel="stylesheet" href="demo.css">
+</head>
+<body>
+  <header class="toolbar">
+    <strong class="title">Server-backed virtual grid</strong>
+    <form id="dims" class="group">
+      <label>Mode
+        <select name="mode">
+          <option value="pivot">Pivot</option>
+          <option value="flat">Flat</option>
+        </select>
+      </label>
+      <label><span data-rows-label>Rows</span> <input name="rows" inputmode="numeric" size="14"></label>
+      <label data-mode="flat">Cols <input name="cols" inputmode="numeric" size="11"></label>
+      <label data-mode="pivot">Years <input name="years" inputmode="numeric" size="6"></label>
+      <label>Latency
+        <select name="latency">
+          <option value="0">0 ms</option>
+          <option value="40">40 ms</option>
+          <option value="150">150 ms</option>
+          <option value="500">500 ms</option>
+          <option value="1000">1000 ms</option>
+        </select>
+      </label>
+      <button type="submit">Load</button>
+    </form>
+    <div id="levels" class="group" hidden></div>
+    <form id="goto" class="group">
+      <label>Row <input name="row" inputmode="numeric" size="14" placeholder="e.g. 734,000,123"></label>
+      <label>Col <input name="col" inputmode="numeric" size="9" placeholder="1"></label>
+      <button type="submit">Go</button>
+    </form>
+  </header>
+  <main id="grid" aria-label="Data grid"></main>
+  <footer id="status" aria-live="off"></footer>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

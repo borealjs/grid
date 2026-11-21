@@ -1,0 +1,19 @@
+{
+  "name": "borealjs-grid-monorepo",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "examples/react"
+  ],
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "dev:react": "npm run dev --workspace examples/react",
+    "typecheck": "tsc -p test/types"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "typescript": "^5.9.3"
+  }
+}

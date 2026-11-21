@@ -1,0 +1,50 @@
+{
+  "name": "@borealjs/grid-core",
+  "version": "0.1.0",
+  "description": "DOM virtual grid for billions of rows and millions of columns, fed by async callbacks: sorting, filtering, pivots, merged cells, selection and copy.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/borealjs/grid.git",
+    "directory": "packages/grid-core"
+  },
+  "homepage": "https://github.com/borealjs/grid/tree/main/packages/grid-core#readme",
+  "bugs": {
+    "url": "https://github.com/borealjs/grid/issues"
+  },
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./style.css": "./src/grid.css",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": [
+    "*.css"
+  ],
+  "keywords": [
+    "grid",
+    "datagrid",
+    "data-grid",
+    "table",
+    "virtual",
+    "virtualization",
+    "pivot",
+    "spreadsheet",
+    "server-side"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
