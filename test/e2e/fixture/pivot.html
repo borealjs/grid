@@ -26,7 +26,7 @@
       getCells: async ({ rects }) => rects.map((r) => Array.from({ length: r.rowCount }, (_, i) => Array.from({ length: r.colCount }, (_, j) => `r${r.row + i}c${r.col + j}`))),
     };
     const events = (window.__events = []);
-    const grid = (window.__grid = createGrid(document.getElementById('grid'), { dataSource, layout, ariaLabel: 'Pivot', expandable: true }));
+    const grid = (window.__grid = createGrid(document.getElementById('grid'), { data: dataSource, layout, ariaLabel: 'Pivot', expandable: true }));
     await grid.ready;
     window.__ready = true;
   </script>

@@ -1,9 +1,8 @@
-import { useMemo, useRef, useState } from 'react';
-import { createArraySource, type ArraySource, type DataSource } from '@borealjs/grid-core';
-import type { ColumnDef, FilterFns } from './types.js';
+import { useRef, useState } from 'react';
+import type { DataSource } from '@borealjs/grid-core';
 
 const SOURCE_METHODS = ['getRows', 'getCells', 'getLayout', 'getLabels', 'getColumns', 'getFilterValues', 'rowAt', 'rowIdAt', 'indexOfRow', 'clearCache'] as const satisfies readonly (keyof DataSource)[];
-const SOURCE_LIMITS = ['maxRectsPerRequest', 'maxCellsPerRequest'] as const satisfies readonly (keyof DataSource)[];
+const SOURCE_LIMITS = ['maxRectsPerRequest', 'maxCellsPerRequest', 'pageSize', 'maxPages'] as const satisfies readonly (keyof DataSource)[];
 
 /** A data source made by useDataSource: `version` moves when its dependencies change. */
 export type ReactDataSource = DataSource & { version: number };
@@ -36,16 +35,4 @@ export function useDataSource(spec: DataSource, deps: readonly unknown[] = []): 
     source.version++;
   }
   return source;
-}
-
-export interface UseArraySourceOptions<Row> {
-  columns?: (ColumnDef<Row> | string | number)[];
-  filterFns?: FilterFns<Row>;
-  compare?(a: unknown, b: unknown): number;
-}
-
-/** An in-memory data source that stays the same object while `rows` and the options do. */
-export function useArraySource<Row = any>(rows: Row[], options?: UseArraySourceOptions<Row>): ArraySource<Row> {
-  const { columns, filterFns, compare } = options ?? {};
-  return useMemo(() => createArraySource(rows, { columns: columns as never, filterFns, compare }), [rows, columns, filterFns, compare]);
 }

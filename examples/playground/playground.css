@@ -251,6 +251,38 @@ canvas { display: block; width: 100%; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translate(-50%, 20px); background: var(--fg); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 60; max-width: calc(100vw - 32px); }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* ------------------------------------------------------------------ columns, customisation, state */
+.pinned-list { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; margin: 2px 0 8px; }
+.pin-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--chip); border-radius: 999px; padding: 2px 4px 2px 9px; }
+.pin-chip button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 4px; }
+.pin-chip button:hover { color: var(--fg); }
+.row-actions.wrap { flex-wrap: wrap; margin-bottom: 10px; }
+.state-panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; background: var(--panel-2); }
+.state-out { margin: 0; max-height: 240px; overflow: auto; font: var(--mono); font-size: 11px; white-space: pre; }
+
+/* Custom header (renderHeader) */
+.hdr { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.hdr-badge { flex: none; width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center; font-size: 10px; font-weight: 700; background: color-mix(in srgb, var(--vg-accent) 16%, transparent); color: var(--vg-accent); }
+.hdr-badge.t-number { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.hdr-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hdr-pin, .hdr-sort { color: var(--vg-accent); font-weight: 600; }
+
+/* Custom empty state (renderEmpty) */
+.empty-custom { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px; color: var(--vg-muted); }
+.empty-custom b { color: var(--vg-fg); }
+
+/* Custom filter (filter: { op, render }) */
+.cf { display: grid; gap: 6px; font-size: 12px; }
+.cf input[type="range"] { accent-color: var(--vg-accent); }
+.cf input[type="number"] { padding: 4px 6px; border: 1px solid var(--vg-line); border-radius: 5px; background: var(--vg-field); color: var(--vg-fg); }
+.cf-hint { display: block; margin-top: 6px; color: var(--vg-muted); font-size: 11px; }
+
+/* Column options and row classes */
+#grid .col-hl { background: color-mix(in srgb, #f5b301 12%, transparent); }
+#grid .col-hl-head { box-shadow: inset 0 -3px 0 #f5b301; }
+#grid .row-hl > * { background: color-mix(in srgb, var(--vg-accent) 8%, transparent); }
+#grid .row-neg > * { background: color-mix(in srgb, var(--bad) 9%, transparent); }
+
 /* ------------------------------------------------------------------ narrow screens */
 @media (max-width: 1180px) {
   .layout, .layout.no-perf { grid-template-columns: 300px minmax(0, 1fr); }

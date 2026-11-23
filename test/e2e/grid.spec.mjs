@@ -75,9 +75,9 @@ test('shift+click adds a second sort key', async ({ page }) => {
   await expect.poll(async () => (await events(page, 'sort')).at(-1)?.payload.map((s) => s.key)).toEqual(['city', 'amount']);
 });
 
-test('API: setFilter narrows rows and fires onFilterChange', async ({ page }) => {
+test('API: setQuery with a filter narrows the rows', async ({ page }) => {
   await open(page);
-  await page.evaluate(() => window.__grid.setFilter([{ column: 2, key: 'city', op: 'in', values: ['Oslo'] }]));
+  await page.evaluate(() => window.__grid.setQuery({ filter: [{ column: 2, key: 'city', op: 'in', values: ['Oslo'] }] }));
   await expect(grid(page)).toHaveAttribute('aria-rowcount', '51'); // 200 rows / 4 cities + header
   await expect(page.getByRole('gridcell', { name: 'Lima', exact: true })).toHaveCount(0);
 });

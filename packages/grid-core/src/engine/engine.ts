@@ -22,9 +22,9 @@ import {
   sameSortKey, sortParamOf, sortToPublic, viewKeyId, type Condition, type SortDir, type SortSpec, type ViewKey,
 } from '../query.js';
 import type {
-  CellClassResult, CellContext, CellEvent, CellPosition, ColumnDef, ColumnDescription, ColumnFilterItem, ColumnResizeInfo, ControlledParts, CopyInfo, EmptyContext,
+  CellClassResult, CellContext, CellEvent, CellPosition, ColumnDef, ColumnDescription, ColumnFilterItem, ColumnResizeInfo, CopyInfo, EmptyContext,
   ErrorContext, FilterItem, FilterTarget, GridStats, HeaderContext, Messages, Progress, Query, Renderer, RowId, RowSelection, Selection, SelectionInfo,
-  SelectionMode, SelectionRange, SortItem, SortTarget, Theme, ViewChangeInfo, ViewWork,
+  QueryPart, SelectionMode, SelectionRange, SortItem, SortTarget, Theme, ViewChangeInfo, ViewWork,
 } from '../types.js';
 import type { Grid } from '../grid.js';
 import { alignDown, alignUp, clamp, errorMessage, prefixSums, trimOldest } from '../util.js';
@@ -144,9 +144,7 @@ export interface EngineOptions {
   onCellClick?(e: CellEvent): void;
   onCellDoubleClick?(e: CellEvent): void;
   onCellContextMenu?(e: CellEvent): void;
-  onSortChange?(sort: SortItem[]): void;
-  onFilterChange?(filter: FilterItem[]): void;
-  onColumnFilterChange?(columnFilter: ColumnFilterItem[]): void;
+  onQueryChange?(query: Query, part: QueryPart): void;
   onSelectionChange?(info: SelectionInfo): void;
   onCopy?(info: CopyInfo): void;
   onColumnResize?(info: ColumnResizeInfo): void;
@@ -269,7 +267,12 @@ interface CornerControl {
   fkey: ViewKey | null;
 }
 
-type QueryPart = 'sort' | 'filter' | 'columnFilter';
+/** The query parts the owner controls (user changes are only reported). */
+export interface ControlledParts {
+  sort?: boolean;
+  filter?: boolean;
+  columnFilter?: boolean;
+}
 type SelectMode = 'set' | 'add' | 'extend';
 
 /** Selection in source coordinates, so it survives collapse / expand. */
@@ -600,10 +603,14 @@ export class GridEngine {
     return this.#publicQuery();
   }
 
+  /** Report a query change: the whole query, with `kind` set to `list` (applied, or asked for when controlled). */
   #emit(kind: QueryPart, list: SortSpec[] | Condition[]): void {
-    if (kind === 'sort') this.o.onSortChange?.(sortToPublic(list as SortSpec[], this.#keyOf));
-    else if (kind === 'filter') this.o.onFilterChange?.(filterToPublic(list as Condition[], this.#keyOf));
-    else this.o.onColumnFilterChange?.(columnFilterToPublic(list as Condition[]));
+    if (!this.o.onQueryChange) return;
+    const query = this.#publicQuery();
+    if (kind === 'sort') query.sort = sortToPublic(list as SortSpec[], this.#keyOf);
+    else if (kind === 'filter') query.filter = filterToPublic(list as Condition[], this.#keyOf);
+    else query.columnFilter = columnFilterToPublic(list as Condition[]);
+    this.o.onQueryChange(query, kind);
   }
 
   /**
@@ -1073,7 +1080,12 @@ export class GridEngine {
   /** Render and cache counters; resets the slowest-frame counter. */
   takeStats(): GridStats {
     const c = this.cache;
-    const s: GridStats = { ...this.stats, cache: { ...c.stats, cached: c.entries.size, inflight: c.inflight.size, queued: c.queue.length } };
+    const s: GridStats = {
+      ...this.stats,
+      cache: { ...c.stats, cached: c.entries.size, inflight: c.inflight.size, queued: c.queue.length },
+      merges: { code: this.merges.code.size, server: this.merges.server.size },
+      scrollScale: { x: this.ratioX, y: this.ratioY },
+    };
     this.stats.renderMsMax = 0;
     return s;
   }

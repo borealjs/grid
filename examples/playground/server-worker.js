@@ -294,6 +294,16 @@ function dictMask(f, cond) {
 
 /** A per-record test for a table filter: number ranges on numeric fields, value lists / text on the rest. */
 function recordTest(f, cond) {
+  // The playground's custom filter (a slider in the filter dialog): the value is a lower bound.
+  if (cond.op === 'atLeast') {
+    const min = Number(cond.value);
+    if (f.kind === 'num') { const v = f.values; return (r) => v[r] >= min; }
+    ensureDim(f);
+    const ok = new Uint8Array(f.dict.length);
+    f.dict.forEach((s, i) => { ok[i] = Number(s) >= min ? 1 : 0; });
+    const codes = f.codes;
+    return (r) => ok[codes[r]] === 1;
+  }
   if (cond.op === 'range') {
     const min = cond.min === undefined || cond.min === null || cond.min === '' ? -Infinity : Number(cond.min);
     const max = cond.max === undefined || cond.max === null || cond.max === '' ? Infinity : Number(cond.max);

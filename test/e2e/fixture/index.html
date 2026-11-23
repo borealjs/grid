@@ -9,7 +9,7 @@
 <body>
   <div id="grid"></div>
   <script type="module">
-    import { createGrid, createArraySource } from '/packages/grid-core/dist/index.js';
+    import { createGrid } from '/packages/grid-core/dist/index.js';
     // Deterministic data: row i has id i, name "Item i", city cycling over 4 values, amount (i * 7) % 50 - 10.
     const CITIES = ['Oslo', 'Lima', 'Pune', 'Rome'];
     // Query params: rows=N, pin=K (pin K leading columns), pinr=K (pin K trailing columns to the right), checks=1 (row checkboxes), wide=1 (extra columns to scroll sideways).
@@ -32,7 +32,7 @@
     const events = (window.__events = []);
     const rec = (type) => (payload) => events.push({ type, payload: JSON.parse(JSON.stringify(payload ?? null)) });
     const grid = (window.__grid = createGrid(document.getElementById('grid'), {
-      dataSource: createArraySource(rows, { columns }),
+      data: rows,
       columns,
       ariaLabel: 'Fixture',
       getRowId: (row) => row.id,
@@ -41,8 +41,7 @@
       ...(qs.get('sortable') === '0' ? { sortable: false } : {}), // sortable=0: header clicks select columns instead of sorting
       ...(qs.get('pin') ? { pinnedColumns: Number(qs.get('pin')) } : {}),
       ...(qs.get('pinr') ? { pinnedColumnsRight: Number(qs.get('pinr')) } : {}), // pinr=K: pin K trailing columns to the right
-      onSortChange: rec('sort'),
-      onFilterChange: rec('filter'),
+      onQueryChange: (query, part) => rec(part)(query[part]), // recorded as 'sort' / 'filter' / 'columnFilter' events
       onSelectionChange: rec('selection'),
       onCopy: rec('copy'),
       onColumnResize: rec('resize'),

@@ -6,7 +6,7 @@
 import {
   forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref,
 } from 'react';
-import { createArraySource, createGrid, type Grid, type GridOptions } from '@borealjs/grid-core';
+import { createArraySource, createGrid, type DataSource, type Grid, type GridOptions } from '@borealjs/grid-core';
 import { collectColumns, toCoreColumn, useCoreColumns } from './columns.js';
 import { createPortalStore, Portals } from './portals.js';
 import type { VirtualGridProps } from './types.js';
@@ -17,19 +17,19 @@ type Props = VirtualGridProps<any>;
 
 /** Event callbacks: stable wrappers that call the latest prop. */
 const CALLBACKS = [
-  'onSortChange', 'onFilterChange', 'onColumnFilterChange', 'onSelectionChange', 'onCopy', 'onError', 'onViewChange', 'onColumnResize', 'onReady',
+  'onQueryChange', 'onSelectionChange', 'onCopy', 'onError', 'onViewChange', 'onColumnResize', 'onReady',
   'onRowSelectionChange', 'onCellClick', 'onCellDoubleClick', 'onCellContextMenu', 'onColumnOrderChange',
 ] as const satisfies readonly (keyof Props & keyof GridOptions)[];
 /** Props passed to the core as they are. */
 const PASS = [
   'layout', 'rowCount', 'columnCount', 'rowHeight', 'headerHeight', 'columnWidth', 'minColumnWidth',
   'columnChooser', 'columnGroups', 'theme', 'sortable', 'filterable', 'resizable', 'multiSort', 'expandable',
-  'selection', 'copy', 'keyboard', 'notices', 'defaultSort', 'defaultFilter', 'defaultColumnFilter', 'blockRows', 'blockCols',
-  'rowHeaderWidths', 'model', 'isMac', 'rowSelection', 'reorderable', 'pinnedColumns', 'pinnedColumnsRight',
+  'selection', 'copy', 'keyboard', 'notices', 'defaultQuery',
+  'rowHeaderWidths', 'rowSelection', 'reorderable', 'pinnedColumns', 'pinnedColumnsRight',
 ] as const satisfies readonly (keyof Props & keyof GridOptions)[];
 /** Object props compared shallowly, so inline objects do not rebuild the grid. */
-const OBJECTS = ['rowHeader', 'messages'] as const satisfies readonly (keyof Props & keyof GridOptions)[];
-const QUERY = ['sort', 'filter', 'columnFilter'] as const satisfies readonly (keyof Props & keyof GridOptions)[];
+const OBJECTS = ['rowHeader', 'messages', 'advanced'] as const satisfies readonly (keyof Props & keyof GridOptions)[];
+const QUERY_PARTS = ['sort', 'filter', 'columnFilter'] as const;
 /** Array / object props compared by content (a new array with the same items is no change). */
 const BY_CONTENT = ['selectedRows', 'columnOrder'] as const satisfies readonly (keyof Props & keyof GridOptions)[];
 
@@ -60,18 +60,21 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
   const { core: columns, fnVersion } = useCoreColumns(list, store);
   const getColumn = useMemo(() => (props.getColumn ? (i: number) => toCoreColumn(props.getColumn!(i), store) : undefined), [props.getColumn, store]);
   // Each object prop on its own: an inline `messages={{ … }}` with the same entries is no change.
-  const stableObjects = { rowHeader: useShallowStable(props.rowHeader), messages: useShallowStable(props.messages) } satisfies Record<(typeof OBJECTS)[number], unknown>;
+  const stableObjects = {
+    rowHeader: useShallowStable(props.rowHeader), messages: useShallowStable(props.messages), advanced: useShallowStable(props.advanced),
+  } satisfies Record<(typeof OBJECTS)[number], unknown>;
 
-  // In-memory rows: one source per column structure; new `rows` arrays go in with setRows + refresh.
+  // In-memory rows (`data` is an array): one source per column structure; new arrays go in with setRows + refresh.
   const filterFnsRef = useRef(props.filterFns);
   filterFnsRef.current = props.filterFns;
-  const useRows = !props.dataSource && !!props.rows;
+  const rows = Array.isArray(props.data) ? (props.data as readonly unknown[]) : undefined;
+  const useRows = !!rows;
   const rowsSource = useMemo(() => {
     if (!useRows) return undefined;
     const filterFns = new Proxy({}, { get: (_, op: string) => filterFnsRef.current?.[op] });
-    return createArraySource(propsRef.current.rows as unknown[], { columns, filterFns });
+    return createArraySource(propsRef.current.data as unknown[], { columns, filterFns });
   }, [useRows, columns]);
-  const dataSource = props.dataSource ?? rowsSource ?? null;
+  const dataSource = rowsSource ?? ((props.data as DataSource | undefined) || null);
 
   // Grid-wide hooks: stable functions reading the latest props (presence changes rebuild the grid).
   const has = (k: keyof Props) => props[k] !== undefined && props[k] !== null && props[k] !== false;
@@ -109,7 +112,7 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
     ...(rules.sortable && { sortable: rules.sortable }),
     ...(rules.filterable && { filterable: rules.filterable }),
     ariaLabel: props['aria-label'],
-    dataSource,
+    data: dataSource,
     columns,
     getColumn,
     ...hooks,
@@ -117,16 +120,13 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
     getRowId,
     selectedRows: props.selectedRows,
     columnOrder: props.columnOrder,
-    // Controlled when the prop is given: the grid reports changes and waits for the new prop.
-    sort: props.sort,
-    filter: props.filter,
-    columnFilter: props.columnFilter,
-    controlled: { sort: props.sort !== undefined, filter: props.filter !== undefined, columnFilter: props.columnFilter !== undefined },
+    // Controlled: the parts of `query` given are owned by the app (the grid reports changes and waits for the prop).
+    query: props.query,
   } as GridOptions;
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  const ready = !!(dataSource || props.model);
+  const ready = !!dataSource;
   useIsoLayoutEffect(() => {
     if (!ready) return undefined;
     const grid = createGrid(hostRef.current!, optionsRef.current);
@@ -151,10 +151,10 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
     if (!grid) return;
     const prev = grid.options;
     const next = { ...optionsRef.current } as Record<string, unknown> & GridOptions;
-    // Controlled queries compare by content (a new array with the same items is no change).
-    for (const k of QUERY) if (next[k] !== undefined && sameJson(next[k], grid.getQuery()[k])) next[k] = prev[k] as never;
+    // A controlled query compares by content (new arrays with the same items are no change).
+    const q = next.query;
+    if (q && prev.query && QUERY_PARTS.every((k) => (q[k] === undefined) === (prev.query![k] === undefined) && (q[k] === undefined || sameJson(q[k], grid.getQuery()[k])))) next.query = prev.query;
     for (const k of BY_CONTENT) if (sameJson(next[k], prev[k])) next[k] = prev[k] as never;
-    if (shallowEqual(next.controlled, prev.controlled)) next.controlled = prev.controlled;
     grid.setOptions(next).catch(() => {});
   });
 
@@ -168,13 +168,13 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
 
   // New rows for the in-memory source: keep scroll, sort and filter, reload what is visible.
   useEffect(() => {
-    if (!rowsSource || rowsSource.rows === props.rows) return;
-    rowsSource.setRows(props.rows as unknown[]);
+    if (!rowsSource || !rows || rowsSource.rows === rows) return;
+    rowsSource.setRows(rows as unknown[]);
     void gridRef.current?.refresh();
-  }, [props.rows, rowsSource]);
+  }, [rows, rowsSource]);
 
   // useDataSource: its dependencies changed -> reload (same source object, new version).
-  const version = (props.dataSource as { version?: number } | undefined)?.version;
+  const version = (rows ? undefined : (props.data as { version?: number } | undefined))?.version;
   const lastVersion = useRef(version);
   useEffect(() => {
     if (lastVersion.current === version) return;
@@ -192,8 +192,7 @@ function VirtualGridImpl(props: Props, ref: Ref<Grid | null>) {
       const want = { active: selected.active ?? cur?.active, ranges: selected.ranges ?? cur?.ranges };
       if (!cur || !sameJson({ active: cur.active, ranges: cur.ranges }, want)) grid.setSelection(selected);
     };
-    if (grid.engine) apply();
-    else grid.ready.then(apply, () => {});
+    grid.ready.then(apply, () => {}); // resolves at once when the grid is already drawn
   }, [selected]);
 
   const { className, style, id } = props;

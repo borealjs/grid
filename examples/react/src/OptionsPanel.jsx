@@ -133,18 +133,18 @@ function codeOf(lang, values) {
       '',
       '<VirtualGrid',
       ...(css ? ['  className="my-grid"'] : []),
-      '  rows={rows} // or dataSource={source}',
+      '  data={rows} // or a data source for your backend',
       '  columns={columns}',
       ...entries.map(([name, value, source]) => `  ${jsx(name, source, value)}`),
       '/>',
     ].join('\n');
   } else {
     code = [
-      `import { createGrid, createArraySource } from '@borealjs/grid-core';`,
+      `import { createGrid } from '@borealjs/grid-core';`,
       `import '@borealjs/grid-core/style.css';`,
       '',
       `createGrid(document.getElementById('grid'), {`,
-      '  dataSource: createArraySource(rows, { columns }), // or your own data source',
+      '  data: rows, // or a data source for your backend',
       '  columns,',
       ...entries.map(([name, , source]) => `  ${name}: ${source},`),
       '});',

@@ -52,8 +52,13 @@ const accessorOf = <Row>(d: ColumnDef<any, Row> | string | number | undefined, i
 type ColumnSpec<Row> = ColumnDef<any, Row> | string | number;
 
 export type RowSource = DataSource & {
-  /** Columns to read rows with (the grid sets them when the source has none of its own). */
-  setColumns(columns: ColumnSpec<any>[] | ((index: number) => ColumnSpec<any>)): void;
+  /**
+   * Columns to read rows with (the grid sets them when the source has none of its own). Undefined: take
+   * them from the first row that loads (its fields for objects, its positions for arrays).
+   */
+  setColumns(columns?: ColumnSpec<any>[] | ((index: number) => ColumnSpec<any>)): void;
+  /** Columns taken from the first row (fields as keys and titles), when none were given; null before it loads. */
+  inferredColumns(): ColumnDef[] | null;
   readonly hasColumns: boolean;
   /** The grid loads the first page of a new sort through getLayout (progress, Cancel). */
   readonly layoutOnSort: boolean;
@@ -65,12 +70,29 @@ export function createRowSource<Row = any>(options: RowSourceOptions<Row>): RowS
   let specAt: (i: number) => ColumnSpec<Row> | undefined = () => undefined;
   let columnCount = 0;
   let accessors: ((row: Row) => unknown)[] = [];
-  const setColumns = (columns: ColumnSpec<Row>[] | ((index: number) => ColumnSpec<Row>)) => {
+  // No columns given: learn them from the first row that loads.
+  let inferring = false;
+  let learned: { keys: string[] | null; count: number } | null = null;
+  const useLearned = () => {
+    specAt = learned?.keys ? (i) => learned!.keys![i] : () => undefined;
+    columnCount = learned?.count ?? 0;
+  };
+  const learn = (rows: Row[]) => {
+    if (!inferring || learned) return;
+    const first = rows.find((r) => r !== null && r !== undefined) as unknown;
+    if (first === undefined || typeof first !== 'object') return;
+    learned = Array.isArray(first) ? { keys: null, count: first.length } : { keys: Object.keys(first as object), count: Object.keys(first as object).length };
     accessors = [];
-    if (typeof columns === 'function') {
+    useLearned();
+  };
+  const setColumns = (columns?: ColumnSpec<Row>[] | ((index: number) => ColumnSpec<Row>)) => {
+    accessors = [];
+    inferring = columns === undefined;
+    if (inferring) useLearned();
+    else if (typeof columns === 'function') {
       specAt = columns;
       columnCount = 0;
-    } else {
+    } else if (columns) {
       specAt = (i) => columns[i];
       columnCount = columns.length;
     }
@@ -93,6 +115,7 @@ export function createRowSource<Row = any>(options: RowSourceOptions<Row>): RowS
   };
 
   const remember = (key: string, page: Page<Row>) => {
+    learn(page.rows);
     pages.delete(key);
     pages.set(key, page);
     while (pages.size > maxPages) pages.delete(pages.keys().next().value as string);
@@ -161,6 +184,7 @@ export function createRowSource<Row = any>(options: RowSourceOptions<Row>): RowS
     hasColumns: options.columns !== undefined,
     layoutOnSort: true,
     setColumns,
+    inferredColumns: () => (inferring && learned?.keys ? learned.keys.map((key) => ({ key, title: key })) : null),
     maxRectsPerRequest: 1000,
     maxCellsPerRequest: 200_000,
     async getLayout({ query, signal, onProgress }): Promise<TableLayout> {

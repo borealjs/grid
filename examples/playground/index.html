@@ -38,6 +38,7 @@
           <button type="button" role="tab" data-tab="generate" aria-selected="true">Generate</button>
           <button type="button" role="tab" data-tab="csv" aria-selected="false">Upload CSV</button>
           <button type="button" role="tab" data-tab="virtual" aria-selected="false" title="Billions of rows, computed per cell">Virtual 1B+</button>
+          <button type="button" role="tab" data-tab="live" aria-selected="false" title="Real public databases: ClickHouse, NYC Open Data">Live DB</button>
         </div>
         <form id="genForm" class="tabpanel" data-panel="generate">
           <label class="field">Rows
@@ -51,13 +52,13 @@
           </div>
           <div class="grid2">
             <label class="field">Dimension columns
-              <input name="dims" type="number" min="1" max="40">
+              <input name="dims" type="number" min="1">
             </label>
             <label class="field">Measure columns
-              <input name="measures" type="number" min="1" max="40">
+              <input name="measures" type="number" min="1">
             </label>
             <label class="field">Years
-              <input name="years" type="number" min="1" max="30">
+              <input name="years" type="number" min="1">
             </label>
             <label class="field">Seed
               <input name="seed" type="number" min="1">
@@ -87,6 +88,19 @@
           </div>
           <button type="button" class="btn block" id="sampleCsv">Try a sample CSV (25,000 rows)</button>
         </div>
+        <form id="liveForm" class="tabpanel" data-panel="live" hidden>
+          <label class="field">Database
+            <select name="provider">
+              <option value="clickhouse">ClickHouse playground (SQL)</option>
+              <option value="nyc">NYC Open Data (Socrata)</option>
+            </select>
+          </label>
+          <label class="field">Table
+            <select name="table"></select>
+          </label>
+          <p class="hint" id="liveHint"></p>
+          <button type="submit" class="btn primary block">Connect</button>
+        </form>
         <form id="virtualForm" class="tabpanel" data-panel="virtual" hidden>
           <label class="field">Rows
             <input name="rows" inputmode="numeric" autocomplete="off">
@@ -101,7 +115,7 @@
               <input name="cols" inputmode="numeric" autocomplete="off">
             </label>
             <label class="field" title="Pivot view: each year adds 68 columns">Years (pivot)
-              <input name="years" type="number" min="1" max="20000">
+              <input name="years" type="number" min="1">
             </label>
           </div>
           <p class="hint">Nothing is stored: the server computes each cell from its row and column number, so size costs no memory. The pivot has a fixed layout and its totals add up exactly. To arrange your own fields, use Generate or Upload CSV.</p>
@@ -159,9 +173,6 @@
             </div>
             <ul id="columnList" class="fields" aria-label="Visible columns"></ul>
           </div>
-          <label class="field">Pinned columns
-            <input type="number" id="pinnedCount" min="0" max="10">
-          </label>
           </div>
         </div>
       </details>
@@ -171,7 +182,7 @@
         <label class="field">Latency per request
           <span class="slider-row">
             <input type="range" id="latencyRange" min="0" max="2000" step="10" aria-label="Latency slider">
-            <span class="num-unit"><input id="latency" type="number" min="0" max="60000" aria-label="Latency in milliseconds"><span>ms</span></span>
+            <span class="num-unit"><input id="latency" type="number" min="0" aria-label="Latency in milliseconds"><span>ms</span></span>
           </span>
         </label>
         <div class="chips-row" id="latencyPresets">
@@ -183,16 +194,16 @@
         </div>
         <div class="grid2">
           <label class="field">Jitter ±
-            <span class="num-unit"><input id="jitter" type="number" min="0" max="10000"><span>ms</span></span>
+            <span class="num-unit"><input id="jitter" type="number" min="0"><span>ms</span></span>
           </label>
           <label class="field">Failure rate
             <span class="num-unit"><input id="failRate" type="number" min="0" max="100"><span>%</span></span>
           </label>
           <label class="field" title="Rows per getRows request (table view)">Page size
-            <input id="pageSize" type="number" min="10" max="5000">
+            <input id="pageSize" type="number" min="1">
           </label>
           <label class="field" title="Most cells per getCells request (pivot view)">Cells / request
-            <input id="maxCells" type="number" min="500" max="200000" step="500">
+            <input id="maxCells" type="number" min="1" step="500">
           </label>
         </div>
         <p class="hint">Every call the grid makes waits for this latency, then the worker "server" computes the answer. Scroll fast to see requests cancelled as they go off screen.</p>
@@ -202,13 +213,13 @@
         <summary>4 · Grid options</summary>
         <div class="grid2">
           <label class="field">Row height
-            <input id="optRowHeight" type="number" min="18" max="80">
+            <input id="optRowHeight" type="number" min="1">
           </label>
           <label class="field">Header height
-            <input id="optHeaderHeight" type="number" min="22" max="80">
+            <input id="optHeaderHeight" type="number" min="1">
           </label>
           <label class="field">Column width
-            <input id="optColumnWidth" type="number" min="48" max="400">
+            <input id="optColumnWidth" type="number" min="1">
           </label>
           <label class="field">Selection
             <select id="optSelection">
@@ -264,6 +275,94 @@
           </label>
         </div>
         <p class="hint">Heatmaps and bars scale to each measure's cell range and skip subtotals.</p>
+      </details>
+
+      <details class="section" id="columnsSection">
+        <summary>6 · Columns &amp; pinning</summary>
+        <p class="hint"><b>Right-click any cell</b> to pin its column left or right, align it, lock its width or position, turn sorting off, highlight or hide it. Drag headers to reorder.</p>
+        <div class="grid2">
+          <label class="field" title="pinnedColumns: pin this many leading columns">Pin first N
+            <input id="pinLeft" type="number" min="0" placeholder="by column">
+          </label>
+          <label class="field" title="pinnedColumnsRight: pin this many trailing columns">Pin last N
+            <input id="pinRight" type="number" min="0" placeholder="by column">
+          </label>
+          <label class="field" title="minColumnWidth: the narrowest a user can resize to">Min width
+            <input id="minWidth" type="number" min="1">
+          </label>
+        </div>
+        <div id="pinnedList" class="pinned-list"></div>
+        <div class="checks">
+          <label class="check"><input type="checkbox" id="keepOrder"> Remember column order</label>
+        </div>
+        <div class="row-actions">
+          <button type="button" class="btn small" id="resetColumns">Reset pins, order &amp; column options</button>
+        </div>
+      </details>
+
+      <details class="section">
+        <summary>7 · Customise</summary>
+        <div class="checks cols2">
+          <label class="check" title="renderHeader"><input type="checkbox" id="advHeader"> Custom headers</label>
+          <label class="check" title="renderEmpty"><input type="checkbox" id="advEmpty"> Custom empty state</label>
+          <label class="check" title="filter: { op, render }"><input type="checkbox" id="advFilter"> Custom number filter</label>
+        </div>
+        <div class="grid2">
+          <label class="field" title="rowClass">Row highlight
+            <select id="advRowClass">
+              <option value="none">None</option>
+              <option value="every5">Every 5th row</option>
+              <option value="negative">Rows with a negative number</option>
+            </select>
+          </label>
+          <label class="field" title="sortable / filterable as functions">Sort &amp; filter rules
+            <select id="advRules">
+              <option value="all">Every column and level</option>
+              <option value="numbers">Number columns only</option>
+              <option value="noText">No filters on text columns</option>
+              <option value="topLevel">Pivot: first row level only</option>
+            </select>
+          </label>
+          <label class="field" title="messages">Language
+            <select id="advLang"></select>
+          </label>
+          <label class="field" title="--vg-font">Font size
+            <input id="advFont" type="number" min="1">
+          </label>
+          <label class="field wide" title="--vg-accent and the selection colours">Accent colour
+            <span class="slider-row"><input id="advAccent" type="color"><button type="button" class="btn small" id="advAccentReset">Default</button></span>
+          </label>
+        </div>
+      </details>
+
+      <details class="section">
+        <summary>8 · State &amp; API</summary>
+        <div class="checks cols2">
+          <label class="check" title="query: the page owns the sort and filters; the grid reports changes (onQueryChange)"><input type="checkbox" id="apiControlled"> Controlled sort &amp; filters</label>
+          <label class="check" title="selectedRows on rebuild"><input type="checkbox" id="apiKeepChecks"> Remember checked rows</label>
+        </div>
+        <div class="row-actions wrap">
+          <button type="button" class="btn small" id="apiCheck10" title="setRowSelection">Check first 10</button>
+          <button type="button" class="btn small" id="apiCheckAll" title="setRowSelection({ checks: [{ from: 0, to: last, query, checked: true }] })">Check all</button>
+          <button type="button" class="btn small" id="apiCheckNone">Clear checks</button>
+          <button type="button" class="btn small" id="apiSelectAll" title="selectAll">Select all cells</button>
+          <button type="button" class="btn small" id="apiCopy" title="copySelection">Copy selection</button>
+          <button type="button" class="btn small" id="apiToggleGroup" title="toggleGroup">Toggle first group</button>
+          <button type="button" class="btn small" id="apiCancel" title="cancel">Cancel running sort</button>
+          <button type="button" class="btn small" id="apiRepaint" title="repaint">Repaint</button>
+        </div>
+        <div class="grid2">
+          <label class="field" title="advanced.blockRows: rows per cached block">Block rows
+            <input id="apiBlockRows" type="number" min="1">
+          </label>
+          <label class="field" title="advanced.blockCols: columns per cached block">Block columns
+            <input id="apiBlockCols" type="number" min="1">
+          </label>
+        </div>
+        <div class="state-panel">
+          <div class="chart-head"><span>Live state</span><span class="muted" id="stateNote"></span></div>
+          <pre id="stateOut" class="state-out"></pre>
+        </div>
       </details>
     </aside>
 
@@ -335,7 +434,8 @@
     <form method="dialog" class="dialog-head">
       <h2>Code for this setup</h2>
       <div class="seg" role="radiogroup" aria-label="Code part" id="codeSeg">
-        <button type="button" role="radio" data-v="client">Grid</button>
+        <button type="button" role="radio" data-v="client">JavaScript</button>
+        <button type="button" role="radio" data-v="react">React</button>
         <button type="button" role="radio" data-v="server">Server contract</button>
       </div>
       <button type="button" class="btn small" id="copyCode">Copy</button>

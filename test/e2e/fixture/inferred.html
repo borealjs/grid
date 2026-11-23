@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>grid e2e fixture: columns taken from the rows</title>
+  <link rel="stylesheet" href="/packages/grid-core/src/grid.css">
+  <style>body{margin:0} #grid{height:400px;width:800px}</style>
+</head>
+<body>
+  <div id="grid"></div>
+  <script type="module">
+    import { createGrid } from '/packages/grid-core/dist/index.js';
+    // No columns are given anywhere on this page. kind=array: rows in memory; kind=rows: a { getRows } source
+    // (calls recorded in window.__calls); kind=arrays: rows that are arrays; kind=given: columns given (they win).
+    const qs = new URLSearchParams(location.search);
+    const kind = qs.get('kind') ?? 'array';
+    const CITIES = ['Oslo', 'Lima', 'Pune', 'Rome'];
+    const rows = Array.from({ length: 500 }, (_, i) => ({ id: i, name: `Item ${i}`, city: CITIES[i % 4], amount: (i * 7) % 50 - 10 }));
+    const calls = (window.__calls = []);
+    const byKey = (key, dir) => (a, b) => (a[key] < b[key] ? -1 : a[key] > b[key] ? 1 : 0) * (dir === 'desc' ? -1 : 1);
+    const getRows = async ({ offset, limit, sort }) => {
+      calls.push({ offset, limit, sort: JSON.parse(JSON.stringify(sort)) });
+      const view = sort.length && sort[0].key ? [...rows].sort(byKey(sort[0].key, sort[0].direction)) : rows;
+      return { rows: view.slice(offset, offset + limit), total: view.length };
+    };
+    const data = kind === 'rows' ? { getRows } : kind === 'arrays' ? rows.map((r) => [r.id, r.name]) : rows;
+    const extra = kind === 'given' ? { columns: [{ key: 'name', title: 'Customer' }, { key: 'amount', title: 'Amount', type: 'number' }] } : {};
+    const grid = (window.__grid = createGrid(document.getElementById('grid'), { data, ariaLabel: 'Inferred', ...extra }));
+    await grid.ready;
+    window.__ready = true;
+  </script>
+</body>
+</html>

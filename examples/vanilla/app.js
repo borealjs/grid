@@ -1,5 +1,5 @@
 // Demo of @borealjs/grid-core against the reference server (server.mjs): the grid only sees a data source.
-import { createGrid, createHttpSource, EMPTY_QUERY } from '../../packages/grid-core/dist/index.js';
+import { createGrid, createHttpSource, EMPTY_QUERY, TreeAxis } from '../../packages/grid-core/dist/index.js';
 
 const fmt = new Intl.NumberFormat('en-US');
 const parseCount = (s) => Number(String(s).replace(/[,_\s]/g, ''));
@@ -33,8 +33,9 @@ function showToast(message, isError = false) {
   toastTimer = setTimeout(() => toast.classList.remove('toast-show'), isError ? 4000 : 2200);
 }
 
+let view = {}; // the last finished sort or filter (onViewChange): its summary texts, for the status bar
 const grid = createGrid(document.getElementById('grid'), {
-  dataSource: source,
+  data: source,
   ...shape,
   // The grid's own notices show slow sorts and filters (with Cancel) and refusals; this page adds toasts
   // for results and copies.
@@ -47,6 +48,7 @@ const grid = createGrid(document.getElementById('grid'), {
     if (info.pending) return;
     if (info.cancelled) return showToast(`${info.what === 'sort' ? 'Sort' : 'Filter'} cancelled`);
     if (!info.ok) return;
+    if (info.what !== 'columns') view = info;
     if (info.what === 'columns') {
       const dropped = info.droppedSorts ? ` · ${info.droppedSorts} column sort${info.droppedSorts > 1 ? 's' : ''} cleared (columns moved)` : '';
       return showToast(info.filter ? `Showing ${fmt.format(info.cols)} columns · ${info.filter}${dropped}` : `Column filter cleared${dropped}`);
@@ -58,15 +60,15 @@ const grid = createGrid(document.getElementById('grid'), {
   },
 });
 await grid.ready;
-const engine = grid.engine; // the demo reads internals (axes, stats) for its status bar and merge demo
-const model = engine.model;
 
 // Merges set from code (pivot demo) ----------------------------------------
-// Source coordinates, built from the pivot structure so they cross group boundaries: collapse the
-// city / quarter they cross and they split into a piece on each side.
+// Source coordinates, worked out from the server's pivot layout with TreeAxis so they cross group
+// boundaries: collapse the city / quarter they cross and they split into a piece on each side.
+const rowTree = layout.type === 'pivot' ? new TreeAxis(layout.rows) : null;
+const colTree = layout.type === 'pivot' ? new TreeAxis(layout.cols) : null;
 function pivotDemoMerges() {
-  const rt = model.rows;
-  const ct = model.cols.base;
+  const rt = rowTree;
+  const ct = colTree;
   const cityStart = (g) => rt.fullItemStart[2][g];
   const citySubtotal = (g) => rt.fullItemStart[2][g] + rt.fullItems[2][g] - 1;
   const monthStart = (q) => ct.fullItemStart[2][q];
@@ -81,7 +83,7 @@ function pivotDemoMerges() {
     { r0: acrossCityTop, c0: monthStart(0), nr: acrossCityBottom - acrossCityTop + 1, nc: 2, label: 'Spans a whole city (collapse it to split)' },
   ];
 }
-const demoRow = () => model.rows.fromSource(model.rows.fullItemStart[2][0] + model.rows.fullItems[2][0] - 4, true);
+const demoRow = () => rowTree.fromSource(rowTree.fullItemStart[2][0] + rowTree.fullItems[2][0] - 4, true);
 
 if (layout.type === 'pivot') {
   const box = document.createElement('span');
@@ -108,8 +110,7 @@ if (layout.type === 'pivot') {
   add('Clear', () => grid.setMerges([]));
   document.getElementById('levels').appendChild(box);
 }
-window.grid = grid;
-window.engine = engine; // handy for poking at it from devtools
+window.grid = grid; // handy for poking at it from devtools
 
 // Toolbar ------------------------------------------------------------------
 const dims = document.getElementById('dims');
@@ -139,7 +140,7 @@ dims.addEventListener('submit', (e) => {
 
 // Expand/collapse by level: "Rows: Region · Country · City · All" -----------
 const levelsBox = document.getElementById('levels');
-if (model.levels) {
+if (grid.levels) {
   levelsBox.hidden = false;
   for (const axis of ['rows', 'cols']) {
     const wrap = document.createElement('span');
@@ -157,7 +158,7 @@ if (model.levels) {
       btn.addEventListener('click', run);
       wrap.appendChild(btn);
     };
-    model.levels[axis].forEach((level, i) => {
+    grid.levels[axis].forEach((level, i) => {
       if (level.collapsible) add(level.name, () => grid.showLevel(axis, i));
     });
     add('All', () => grid.expandAll(axis));
@@ -183,21 +184,21 @@ function updateStatus() {
   const parts = [];
   const sel = grid.selectionInfo();
   const value = sel.text === undefined ? '…' : sel.text === '' ? '(empty)' : sel.text;
-  if (engine.filterSpec.length) parts.push(`Filtered: ${engine.filterSummary()}`);
-  if (engine.sortSpec.length) parts.push(`Sorted by ${engine.sortSummary()}`);
+  if (view.filter) parts.push(`Filtered: ${view.filter}`);
+  if (view.sort) parts.push(`Sorted by ${view.sort}`);
   parts.push(`Cell ${fmt.format(sel.active.r + 1)}, ${fmt.format(sel.active.c + 1)}: ${value}`);
   if (sel.cells > 1) parts.push(`selected ${sel.ranges > 1 ? `${sel.ranges} ranges, ` : ''}${fmt.format(sel.rows)} × ${fmt.format(sel.cols)}${sel.ranges > 1 ? ' (last)' : ''} = ${fmt.format(sel.cells)} cells`);
   if (v) {
-    parts.push(`Rows ${fmt.format(v.firstRow + 1)}–${fmt.format(v.lastRow + 1)} of ${fmt.format(grid.rowCount)}${engine.filterSpec.length && model.totalRows ? ` (filtered from ${fmt.format(model.totalRows)})` : ''}`);
+    parts.push(`Rows ${fmt.format(v.firstRow + 1)}–${fmt.format(v.lastRow + 1)} of ${fmt.format(grid.rowCount)}${view.filter && view.totalRows ? ` (filtered from ${fmt.format(view.totalRows)})` : ''}`);
     parts.push(`Cols ${fmt.format(v.firstCol + 1)}–${fmt.format(v.lastCol + 1)} of ${fmt.format(grid.columnCount)}`);
   }
   parts.push(`render ${s.renderMsEma.toFixed(2)} ms avg · ${s.renderMsMax.toFixed(2)} ms max`);
   parts.push(`blocks ${s.cache.cached} cached · ${s.cache.inflight} loading · ${s.cache.queued} queued`);
   parts.push(`${fmt.format(s.cache.requests)} requests (${fmt.format(s.cache.gatherRequests)} gathered, ${fmt.format(s.cache.aborted)} cancelled${s.cache.errors ? `, ${s.cache.errors} failed` : ''})`);
   parts.push(`${fmt.format(s.cache.cellsFetched)} cells fetched`);
-  if (engine.merges.size) parts.push(`${fmt.format(engine.merges.code.size)} code + ${fmt.format(engine.merges.server.size)} server merges`);
+  if (s.merges.code || s.merges.server) parts.push(`${fmt.format(s.merges.code)} code + ${fmt.format(s.merges.server)} server merges`);
   if (s.cache.lastMs) parts.push(`last fetch ${Math.round(s.cache.lastMs)} ms`);
-  if (engine.ratioY > 1) parts.push(`scrollbar scaled ×${fmt.format(Math.round(engine.ratioY))}`);
+  if (s.scrollScale.y > 1) parts.push(`scrollbar scaled ×${fmt.format(Math.round(s.scrollScale.y))}`);
   status.textContent = parts.join('  ·  ');
 }
 setInterval(updateStatus, 250);

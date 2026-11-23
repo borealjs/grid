@@ -9,7 +9,7 @@ const ctl = (page, fn, arg) => page.evaluate(([f, a]) => { const c = window.__ct
 const notice = (page) => page.locator('.vg-notice:not(.vg-work).vg-notice-show');
 const work = (page) => page.locator('.vg-work.vg-notice-show');
 const scrollTo = (page, row) => page.locator('.vg-scroller').evaluate((el, r) => { el.scrollTop = r * 28; }, row);
-const sortAmount = (page) => page.evaluate(() => window.__grid.setSort([{ column: 3, key: 'amount', direction: 'asc' }]));
+const sortAmount = (page) => page.evaluate(() => window.__grid.setQuery({ sort: [{ column: 3, key: 'amount', direction: 'asc' }] }));
 
 test.describe('loading', () => {
   test('cells show a placeholder while their rows load, then the values', async ({ page }) => {
@@ -73,7 +73,7 @@ test.describe('errors', () => {
   test('a failing filter shows an error notice', async ({ page }) => {
     await open(page);
     await ctl(page, 'c.fail = true');
-    await page.evaluate(() => window.__grid.setFilter([{ column: 2, key: 'city', op: 'in', values: ['Oslo'] }]));
+    await page.evaluate(() => window.__grid.setQuery({ filter: [{ column: 2, key: 'city', op: 'in', values: ['Oslo'] }] }));
     await expect(notice(page).filter({ hasText: /Filtering failed/ })).toBeVisible();
   });
 
@@ -123,7 +123,7 @@ test.describe('slow sort / filter', () => {
     await ctl(page, 'c.held = true');
     void sortAmount(page);
     await expect(work(page)).toBeVisible();
-    void page.evaluate(() => window.__grid.setSort([{ column: 1, key: 'name', direction: 'desc' }]));
+    void page.evaluate(() => window.__grid.setQuery({ sort: [{ column: 1, key: 'name', direction: 'desc' }] }));
     await ctl(page, 'c.release()');
     await expect.poll(() => page.evaluate(() => window.__grid.getQuery().sort.map((s) => s.key))).toEqual(['name']);
   });
@@ -144,15 +144,15 @@ test.describe('empty states', () => {
 
   test('a filter that matches nothing says so', async ({ page }) => {
     await open(page);
-    await page.evaluate(() => window.__grid.setFilter([{ column: 3, key: 'amount', op: 'range', min: 5000, max: 6000 }]));
+    await page.evaluate(() => window.__grid.setQuery({ filter: [{ column: 3, key: 'amount', op: 'range', min: 5000, max: 6000 }] }));
     await expect(page.locator('.vg-empty')).toHaveText('No rows match the filter');
   });
 
   test('clearing the filter brings the rows back and hides the message', async ({ page }) => {
     await open(page);
-    await page.evaluate(() => window.__grid.setFilter([{ column: 3, key: 'amount', op: 'range', min: 5000, max: 6000 }]));
+    await page.evaluate(() => window.__grid.setQuery({ filter: [{ column: 3, key: 'amount', op: 'range', min: 5000, max: 6000 }] }));
     await expect(page.locator('.vg-empty')).toBeVisible();
-    await page.evaluate(() => window.__grid.setFilter([]));
+    await page.evaluate(() => window.__grid.setQuery({ filter: [] }));
     await expect(page.locator('.vg-empty')).toBeHidden();
     await expect(page.getByRole('gridcell', { name: 'Item 1', exact: true })).toBeVisible();
   });

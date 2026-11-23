@@ -21,7 +21,7 @@ test('VirtualGrid renders on the server without touching the DOM', () => {
 test('useDataSource works during server rendering', () => {
   function Server() {
     const source = useDataSource({ getCells: async () => [] }, ['x']);
-    return createElement(VirtualGrid, { dataSource: source, columns: [{ field: 'a' }] });
+    return createElement(VirtualGrid, { data: source, columns: [{ field: 'a' }] });
   }
   assert.doesNotThrow(() => renderToString(createElement(Server)));
 });

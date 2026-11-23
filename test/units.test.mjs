@@ -2,7 +2,12 @@
 // clipboard helpers and cache keys. Imported from the TypeScript sources (npm test loads them with tsx).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TreeAxis, UniformAxis, ResizableAxis, createTableModel, EMPTY_QUERY } from '../packages/grid-core/src/index.ts';
+// Internals are not exported from the package: tests import them from their modules.
+import { TreeAxis } from '../packages/grid-core/src/index.ts';
+import { UniformAxis } from '../packages/grid-core/src/axes/axis.ts';
+import { ResizableAxis } from '../packages/grid-core/src/axes/resizable.ts';
+import { createTableModel } from '../packages/grid-core/src/model/table.ts';
+import { EMPTY_QUERY } from '../packages/grid-core/src/query.ts';
 import { RunOrder } from '../packages/grid-core/src/model/column-order.ts';
 import { MergeIndex, mergePieces, normalizeMerge } from '../packages/grid-core/src/engine/merges.ts';
 import { cellRange, rangeOf, isActiveOnly, inRanges, cellCount } from '../packages/grid-core/src/engine/selection.ts';

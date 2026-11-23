@@ -2,7 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createArraySource, createHttpSource, createRowSource, compareValues, EMPTY_QUERY } from '../packages/grid-core/dist/index.js';
+import { createArraySource, createHttpSource, compareValues, EMPTY_QUERY } from '../packages/grid-core/dist/index.js';
+import { createRowSource } from '../packages/grid-core/src/sources/rows.ts'; // internal: the grid wraps `{ getRows }` data in it
 import { sortFromPublic, sortToPublic, filterFromPublic, filterToPublic, columnFilterFromPublic, columnFilterToPublic } from '../packages/grid-core/src/query.ts';
 
 const rows = [
@@ -259,4 +260,24 @@ test('reference server: columns are described on demand and a column filter renu
   const kept = await call('block', `&r0=0&c0=1&nr=3&nc=1&sort=1:d${cf}`);
   const all = await call('block', '&r0=0&c0=3&nr=3&nc=1&sort=3:d');
   assert.deepEqual(kept.cells, all.cells);
+});
+
+test('row source: without columns, the first page decides them (fields as keys and titles)', async () => {
+  const src = createRowSource({ getRows: async ({ offset, limit }) => ({ rows: [{ id: 1, name: 'Ada' }, { id: 2, name: 'Grace' }].slice(offset, offset + limit), total: 2 }) });
+  src.setColumns(undefined);
+  assert.equal(src.inferredColumns(), null); // nothing loaded yet
+  const layout = await src.getLayout({ query: EMPTY_QUERY });
+  assert.equal(layout.columnCount, 2);
+  assert.deepEqual(src.inferredColumns(), [{ key: 'id', title: 'id' }, { key: 'name', title: 'name' }]);
+  const [cells] = await src.getCells({ rects: [{ row: 0, col: 0, rowCount: 2, colCount: 2 }], query: EMPTY_QUERY });
+  assert.deepEqual(cells, [1, 'Ada', 2, 'Grace']);
+  src.setColumns(['name']); // columns given: no inference
+  assert.equal(src.inferredColumns(), null);
+});
+
+test('array source: inferred columns are the first row\'s fields, or none with columns or array rows', () => {
+  assert.deepEqual(createArraySource([{ a: 1, b: 2 }]).inferredColumns(), [{ key: 'a', title: 'a' }, { key: 'b', title: 'b' }]);
+  assert.equal(createArraySource([{ a: 1 }], { columns: ['a'] }).inferredColumns(), null);
+  assert.equal(createArraySource([[1, 2]]).inferredColumns(), null);
+  assert.equal(createArraySource([]).inferredColumns(), null);
 });

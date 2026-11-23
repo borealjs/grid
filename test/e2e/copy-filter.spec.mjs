@@ -40,7 +40,7 @@ test.describe('copy', () => {
 
   test('copy follows the current sort order', async ({ page }) => {
     await open(page);
-    await page.evaluate(() => window.__grid.setSort([{ column: 3, key: 'amount', direction: 'desc' }]));
+    await page.evaluate(() => window.__grid.setQuery({ sort: [{ column: 3, key: 'amount', direction: 'desc' }] }));
     await expect.poll(() => page.evaluate(() => window.__grid.cellText(0, 3))).not.toBe('-10');
     const top = await page.evaluate(() => window.__grid.cellText(0, 1));
     await cell(page, top).click();
@@ -203,14 +203,14 @@ test.describe('filter dialog', () => {
     await apply(page).click();
     await expect.poll(() => rowCount(page)).toBe(50);
     await expect(filterBtn(page, /City/)).toHaveClass(/vg-filter-on/);
-    await page.evaluate(() => window.__grid.setSort([{ column: 0, key: 'id', direction: 'desc' }]));
+    await page.evaluate(() => window.__grid.setQuery({ sort: [{ column: 0, key: 'id', direction: 'desc' }] }));
     await expect.poll(() => page.evaluate(() => window.__grid.cellText(0, 2))).toBe('Oslo');
     expect(await page.evaluate(() => window.__grid.cellText(0, 0))).toBe('196'); // largest id below 200 with i % 4 == 0
   });
 
   test('API: setFilter and the dialog agree on state', async ({ page }) => {
     await open(page);
-    await page.evaluate(() => window.__grid.setFilter([{ column: 2, key: 'city', op: 'in', values: ['Pune'] }]));
+    await page.evaluate(() => window.__grid.setQuery({ filter: [{ column: 2, key: 'city', op: 'in', values: ['Pune'] }] }));
     await expect.poll(() => rowCount(page)).toBe(50);
     await filterBtn(page, /City/).click();
     await expect(dialog(page).getByRole('checkbox', { name: 'Pune' })).toBeChecked();
@@ -219,7 +219,7 @@ test.describe('filter dialog', () => {
 
   test('a filter matching nothing leaves zero rows', async ({ page }) => {
     await open(page);
-    await page.evaluate(() => window.__grid.setFilter([{ column: 3, key: 'amount', op: 'range', min: 1000, max: 2000 }]));
+    await page.evaluate(() => window.__grid.setQuery({ filter: [{ column: 3, key: 'amount', op: 'range', min: 1000, max: 2000 }] }));
     await expect.poll(() => rowCount(page)).toBe(0);
     await expect(page.getByRole('gridcell')).toHaveCount(0);
   });

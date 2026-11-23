@@ -63,7 +63,7 @@ const customers = [
 
 export default function App() {
   return (
-    <VirtualGrid rows={customers} style={{ height: 400 }} aria-label="Customers">
+    <VirtualGrid data={customers} style={{ height: 400 }} aria-label="Customers">
       <Column field="name" title="Customer" />
       <Column field="status" title="Status" filter="values" />
       <Column field="amount" title="Amount" type="number" />
@@ -83,7 +83,7 @@ npm install @borealjs/grid-core
 ```
 
 ```js
-import { createGrid, createArraySource } from '@borealjs/grid-core';
+import { createGrid } from '@borealjs/grid-core';
 import '@borealjs/grid-core/style.css';
 
 const customers = [
@@ -97,7 +97,7 @@ const columns = [
 ];
 
 createGrid(document.getElementById('grid'), {
-  dataSource: createArraySource(customers, { columns }),
+  data: customers,
   columns,
 });
 ```
@@ -112,7 +112,8 @@ every setting on and off and gives you the code for it, in React or plain JavaSc
 
 The repository also has a [plain JavaScript example](examples/vanilla), with no React, and a
 [playground](examples/playground): load your own CSV or generate millions of rows, drag fields into rows,
-columns and values, set the server latency, and watch requests, timings and frame rate live. To run all three
+columns and values, page through a billion virtual rows or live public databases (the ClickHouse playground,
+pivoted block by block in SQL, and NYC Open Data), set the server latency, and watch requests, timings and frame rate live. To run all three
 on your machine:
 
 ```bash

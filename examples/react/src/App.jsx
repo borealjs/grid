@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { VirtualGrid, Column, createHttpSource, useDataSource } from '@borealjs/react-grid';
-import { EMPTY_QUERY } from '@borealjs/grid-core';
+import { EMPTY_QUERY, TreeAxis } from '@borealjs/grid-core';
 import { inBrowserFetch } from './inBrowserApi.js';
 import { OptionsPanel, useGridOptions, gridPropsOf, cssVarsOf } from './OptionsPanel.jsx';
 
@@ -126,8 +126,10 @@ function InMemoryDemo({ grid: gridProps }) {
   const [seed, setSeed] = useState(1);
   // Plain React state: a new array updates the grid in place (scroll, sort and filter stay).
   const [rows, setRows] = useState(() => makeRows(200_000, 1));
-  const [sort, setSort] = useState([{ key: 'amount', direction: 'desc' }]); // controlled
-  const [filter, setFilter] = useState([]); // controlled
+  // Controlled query: the grid reports what the user asks for (onQueryChange) and shows what we pass back.
+  const [query, setQuery] = useState({ sort: [{ key: 'amount', direction: 'desc' }], filter: [] });
+  const { sort, filter } = query;
+  const clearFilters = () => setQuery((q) => ({ ...q, filter: [] }));
   const [highlight, setHighlight] = useState('');
   const [selection, setSelection] = useState(null);
   const [checked, setChecked] = useState({ checks: [] });
@@ -143,20 +145,18 @@ function InMemoryDemo({ grid: gridProps }) {
         </label>
         <button type="button" onClick={() => { const s = seed + 1; setSeed(s); setRows(makeRows(count, s)); }}>New data</button>
         <label className="field">Highlight <input value={highlight} onChange={(e) => setHighlight(e.target.value)} placeholder="name contains…" /></label>
-        <button type="button" onClick={() => setSort([])} disabled={!sort.length}>Clear sort</button>
-        <button type="button" onClick={() => setFilter([])} disabled={!filter.length}>Clear filters</button>
+        <button type="button" onClick={() => setQuery((q) => ({ ...q, sort: [] }))} disabled={!sort.length}>Clear sort</button>
+        <button type="button" onClick={clearFilters} disabled={!filter.length}>Clear filters</button>
       </div>
       {/* Columns as JSX, with inline functions: no useMemo needed. */}
       <VirtualGrid
         ref={grid}
         className="grid"
         aria-label="Customers"
-        rows={rows}
+        data={rows}
         {...gridProps}
-        sort={sort}
-        onSortChange={setSort}
-        filter={filter}
-        onFilterChange={setFilter}
+        query={query}
+        onQueryChange={setQuery}
         onSelectionChange={setSelection}
         getRowId={(row) => row.id}
         rowSelection
@@ -164,7 +164,7 @@ function InMemoryDemo({ grid: gridProps }) {
         onRowSelectionChange={setChecked}
         filterFns={{ atLeast: (value, min) => value >= min }}
         emptyState={({ filtered }) => (filtered
-          ? <div className="empty">No customers match. <button type="button" onClick={() => setFilter([])}>Clear filters</button></div>
+          ? <div className="empty">No customers match. <button type="button" onClick={clearFilters}>Clear filters</button></div>
           : <div className="empty">No customers yet.</div>)}
         onError={(err) => console.error(err)}
       >
@@ -282,7 +282,7 @@ function CustomBackendDemo({ grid: gridProps }) {
           ref={grid}
           className="grid"
           aria-label="Orders"
-          dataSource={source}
+          data={source}
           {...gridProps}
           getRowId={(row) => row.id}
           rowSelection
@@ -438,11 +438,9 @@ function StatsBar({ grid, timing }) {
 // ------------------------------------------------------------------ server pivot
 
 // Merged cells set from code (grid.setMerges). Positions are in the fully expanded pivot, worked out from
-// its row and column trees (low-level grid internals, fine for a demo), so they cross group boundaries:
-// collapse the city or quarter a merge crosses and it splits into a piece on each side.
-function pivotDemoMerges(model) {
-  const rt = model.rows;
-  const ct = model.cols.base;
+// the data source's pivot layout with TreeAxis, so they cross group boundaries: collapse the city or quarter
+// a merge crosses and it splits into a piece on each side.
+function pivotDemoMerges(rt, ct) {
   const cityStart = (g) => rt.fullItemStart[2][g];
   const citySubtotal = (g) => rt.fullItemStart[2][g] + rt.fullItems[2][g] - 1;
   const monthStart = (q) => ct.fullItemStart[2][q];
@@ -458,10 +456,11 @@ function pivotDemoMerges(model) {
   ];
 }
 
-function showMerges(grid, where) {
-  const model = grid.engine.model;
-  grid.setMerges(pivotDemoMerges(model));
-  const row = where === 'edge' ? model.rows.fromSource(model.rows.fullItemStart[2][0] + model.rows.fullItems[2][0] - 4, true) : 0;
+async function showMerges(grid, source, where) {
+  const layout = await source.getLayout({ query: EMPTY_QUERY });
+  const rows = new TreeAxis(layout.rows);
+  grid.setMerges(pivotDemoMerges(rows, new TreeAxis(layout.cols)));
+  const row = where === 'edge' ? rows.fromSource(rows.fullItemStart[2][0] + rows.fullItems[2][0] - 4, true) : 0;
   grid.scrollToCell(row, 0);
 }
 
@@ -489,8 +488,8 @@ function PivotDemo({ grid: gridProps }) {
         {levels && (
           <span className="seg">
             <span className="muted">Merged cells</span>
-            <button type="button" onClick={() => showMerges(grid.current, 'top')}>Show</button>
-            <button type="button" onClick={() => showMerges(grid.current, 'edge')}>Across a city</button>
+            <button type="button" onClick={() => showMerges(grid.current, source, 'top')}>Show</button>
+            <button type="button" onClick={() => showMerges(grid.current, source, 'edge')}>Across a city</button>
             <button type="button" onClick={() => grid.current.setMerges([])}>Clear</button>
           </span>
         )}
@@ -500,7 +499,7 @@ function PivotDemo({ grid: gridProps }) {
         ref={grid}
         className="grid"
         aria-label="Sales pivot"
-        dataSource={source}
+        data={source}
         {...gridProps}
         onReady={(g) => setLevels(g.levels)}
         onViewChange={onViewChange}
@@ -549,7 +548,7 @@ function HugeTableDemo({ grid: gridProps }) {
           ref={grid}
           className="grid"
           aria-label="A billion rows"
-          dataSource={source}
+          data={source}
           layout={layout}
           columnCount={layout.columnCount}
           columnChooser

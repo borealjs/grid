@@ -1,20 +1,21 @@
 // @borealjs/react-grid — React bindings for @borealjs/grid-core.
 //
-//   <VirtualGrid rows={data} columns={columns} />                       in-memory rows
-//   <VirtualGrid dataSource={useDataSource({ getCells, … }, deps)} />    your backend
-//   <VirtualGrid rows={data}><Column field="name" title="Name" /></VirtualGrid>
+//   <VirtualGrid data={rows} columns={columns} />                      in-memory rows
+//   <VirtualGrid data={useDataSource({ getRows, … }, deps)} />          your backend
+//   <VirtualGrid data={rows}><Column field="name" title="Name" /></VirtualGrid>
 
 export { VirtualGrid } from './VirtualGrid.js';
 export { Column, createColumnHelper, type ColumnHelper } from './columns.js';
-export { useDataSource, useArraySource, type ReactDataSource, type UseArraySourceOptions } from './hooks.js';
+export { useDataSource, type ReactDataSource } from './hooks.js';
 export type { CellContext, CellEvent, ColumnDef, FieldValue, FilterFns, ReactCustomFilter, SelectedCells, VirtualGridProps } from './types.js';
 
-export { createArraySource, createHttpSource, createRowSource } from '@borealjs/grid-core';
+export { createArraySource, createHttpSource } from '@borealjs/grid-core';
 export type {
   Grid,
-  Grid as GridApi,
   DataSource,
   Query,
+  QueryPart,
+  AdvancedOptions,
   SortItem,
   FilterItem,
   ColumnFilterItem,
@@ -41,6 +42,4 @@ export type {
   GetColumnsRequest,
   GetRowsRequest,
   RowsResult,
-  RowSource,
-  RowSourceOptions,
 } from '@borealjs/grid-core';

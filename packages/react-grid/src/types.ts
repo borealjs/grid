@@ -57,12 +57,13 @@ export interface SelectedCells {
 }
 
 export interface VirtualGridProps<Row = any>
-  extends Omit<GridOptions, 'ariaLabel' | 'dataSource' | 'columns' | 'getColumn' | 'renderCell' | 'renderHeader' | 'renderEmpty' | 'format' | 'cellClass' | 'controlled'
+  extends Omit<GridOptions, 'ariaLabel' | 'data' | 'columns' | 'getColumn' | 'renderCell' | 'renderHeader' | 'renderEmpty' | 'format' | 'cellClass'
     | 'getRowId' | 'onCellClick' | 'onCellDoubleClick' | 'onCellContextMenu'> {
-  /** In-memory data (sorted, filtered and searched in the browser). New arrays update the grid in place. */
-  rows?: readonly Row[];
-  /** Or any data source (your backend: see useDataSource). */
-  dataSource?: DataSource;
+  /**
+   * The rows (sorted, filtered and searched in the browser; new arrays update the grid in place), or a data
+   * source for your backend (see useDataSource).
+   */
+  data?: readonly Row[] | DataSource;
   columns?: ColumnDef<Row>[];
   /** Or declare columns as <Column> children. */
   children?: ReactNode;

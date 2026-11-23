@@ -17,7 +17,7 @@ components.
 </picture>
 
 ```jsx
-<VirtualGrid rows={customers} style={{ height: 600 }}>
+<VirtualGrid data={customers} style={{ height: 600 }}>
   <Column field="name" title="Customer" />
   <Column field="status" title="Status" filter="values" renderCell={({ value }) => <Badge status={value} />} />
   <Column field="amount" title="Amount" type="number" format={(v) => money.format(v)} />
@@ -88,7 +88,7 @@ const customers = [
 
 export default function Customers() {
   return (
-    <VirtualGrid rows={customers} style={{ height: 600 }} aria-label="Customers">
+    <VirtualGrid data={customers} style={{ height: 600 }} aria-label="Customers">
       <Column field="id" title="ID" type="number" width={80} />
       <Column field="name" title="Customer" width={220} />
       <Column field="status" title="Status" filter="values" />
@@ -108,7 +108,9 @@ resizes columns, selects ranges, copies with ⌘C / Ctrl+C and works from the ke
 
 ## Columns
 
-Columns can be JSX children or an array. Both take the same props.
+Columns are optional: `<VirtualGrid data={rows} />` shows each field of the first row as a column, titled with
+its name (for a `useDataSource` with `getRows`, the fields of the first page). Give columns for titles, types,
+widths, formats and filters. They can be JSX children or an array; both take the same props.
 
 ```jsx
 const columns = [
@@ -116,7 +118,7 @@ const columns = [
   { field: 'amount', title: 'Amount', type: 'number' },
 ];
 
-<VirtualGrid rows={rows} columns={columns} />
+<VirtualGrid data={rows} columns={columns} />
 ```
 
 `field` names the row property to show. It is also the column's id in sort, filter and events. `type="number"`
@@ -138,7 +140,7 @@ edge, which suits row actions, a status or a total. Users can drag column header
 cancels); pinned columns stay together on their side and are reordered among themselves.
 
 ```jsx
-<VirtualGrid rows={rows} onColumnOrderChange={(order) => save('order', order)} columnOrder={savedOrder}>
+<VirtualGrid data={rows} onColumnOrderChange={(order) => save('order', order)} columnOrder={savedOrder}>
   <Column field="id" title="ID" pinned />
   <Column field="name" title="Customer" pinned />
   <Column field="amount" title="Amount" type="number" />
@@ -195,7 +197,7 @@ its own, and to pivots.
 ```jsx
 const [rows, setRows] = useState(initialRows);
 
-<VirtualGrid rows={rows} columns={columns} />
+<VirtualGrid data={rows} columns={columns} />
 ```
 
 Sorting, filtering and value lists run in the browser; a million rows is fine. Text sorts naturally ("Item 2"
@@ -225,7 +227,7 @@ const source = useDataSource({
   getCells: ({ rects, query, signal }) => api.cells(rects, query, signal), // one [[a, b], [c, d]] per rect
 }, [customerId]);
 
-<VirtualGrid dataSource={source} columns={columns} aria-label="Orders" />
+<VirtualGrid data={source} columns={columns} aria-label="Orders" />
 ```
 
 The query names columns by `field` (and index):
@@ -260,7 +262,7 @@ function Orders({ customerId }) {
   }, [customerId]);
 
   return (
-    <VirtualGrid dataSource={source} getRowId={(row) => row.id} style={{ height: 600 }} aria-label="Orders">
+    <VirtualGrid data={source} getRowId={(row) => row.id} style={{ height: 600 }} aria-label="Orders">
       <Column field="id" title="Order" type="number" />
       <Column field="product" title="Product" filter="values" />
       <Column field="total" title="Total" type="number" />
@@ -287,7 +289,7 @@ With an id for each row the grid keeps track of rows, not positions: after a sor
 are now.
 
 ```jsx
-<VirtualGrid rows={rows} getRowId={(row) => row.id} />
+<VirtualGrid data={rows} getRowId={(row) => row.id} />
 ```
 
 - In-memory rows default to the row object itself, so pass `getRowId` when you replace rows with new objects
@@ -327,7 +329,7 @@ about each column (`{ axis: 'cols', column, key }`) and level (`{ axis: 'rows' |
 
 ```jsx
 <VirtualGrid
-  dataSource={source}
+  data={source}
   sortable={(target) => target.key !== 'notes'}
   filterable={(target) => target.axis !== 'rows' || target.level < 2}
 />
@@ -370,39 +372,36 @@ function MinScore({ value, setValue }) {
   return <input type="range" min={0} max={100} value={min} onChange={(e) => setMin(+e.target.value)} />;
 }
 
-<VirtualGrid rows={rows} filterFns={{ atLeast: (cellValue, min) => cellValue >= min }}>
+<VirtualGrid data={rows} filterFns={{ atLeast: (cellValue, min) => cellValue >= min }}>
   <Column field="score" type="number" filter={{ op: 'atLeast', render: (api) => <MinScore {...api} /> }} />
 </VirtualGrid>
 ```
 
-With `rows`, `filterFns[op](cellValue, value, row)` decides which rows stay. A server receives
+With rows in memory, `filterFns[op](cellValue, value, row)` decides which rows stay. A server receives
 `{ key: 'score', op: 'atLeast', value: 72 }` in the query's filter list.
 
 ## Controlled state
 
-Pass a value to control it; leave it out to let the grid keep it (`defaultSort` and friends set where it
-starts).
+The sort, row filter and column filter are one `query`. Pass it to control them; leave it out to let the grid
+keep them (`defaultQuery` sets where they start). Only the parts you pass are controlled: `query={{ sort }}`
+controls the sort and leaves the filters to the grid.
 
 ```jsx
-const [sort, setSort] = useState([{ key: 'amount', direction: 'desc' }]);
-const [filter, setFilter] = useState([]);
+const [query, setQuery] = useState({ sort: [{ key: 'amount', direction: 'desc' }], filter: [] });
 
-<VirtualGrid rows={rows} columns={columns}
-  sort={sort} onSortChange={setSort}
-  filter={filter} onFilterChange={setFilter} />
+<VirtualGrid data={rows} columns={columns} query={query} onQueryChange={setQuery} />
 
-<button onClick={() => setFilter([])}>Clear filters</button>
+<button onClick={() => setQuery((q) => ({ ...q, filter: [] }))}>Clear filters</button>
 ```
 
 | Value | Change event | Uncontrolled starting value |
 |---|---|---|
-| `sort` | `onSortChange` | `defaultSort` |
-| `filter` | `onFilterChange` | `defaultFilter` |
-| `columnFilter` | `onColumnFilterChange` | `defaultColumnFilter` |
+| `query` | `onQueryChange(query, part)` | `defaultQuery` |
 | `selectedCells` | `onSelectionChange` | |
 
-Values are compared by content, so a new array with the same items changes nothing. Sort and filter items may
-name a column by `key` (its field) or `column` (its index).
+`part` says what the user changed: `'sort'`, `'filter'` or `'columnFilter'`. Values are compared by content, so
+a new array with the same items changes nothing. Sort and filter items may name a column by `key` (its field)
+or `column` (its index).
 
 ## Selection and copy
 
@@ -427,7 +426,7 @@ a range, and Space checks the active row.
 const grid = useRef(null);
 const [checked, setChecked] = useState({ checks: [] });
 
-<VirtualGrid ref={grid} rows={rows} getRowId={(row) => row.id} rowSelection selectedRows={checked} onRowSelectionChange={setChecked} />
+<VirtualGrid ref={grid} data={rows} getRowId={(row) => row.id} rowSelection selectedRows={checked} onRowSelectionChange={setChecked} />
 <span>{grid.current?.checkedCount() ?? 'Some'} checked</span>
 ```
 
@@ -450,7 +449,7 @@ stay checked.
 
 ```jsx
 <VirtualGrid
-  rows={rows}
+  data={rows}
   onCellClick={({ row, key, value }) => setDetail(row)}
   onCellDoubleClick={({ row }) => openEditor(row)}
   onCellContextMenu={({ row, event }) => {
@@ -470,7 +469,7 @@ cell clicks.
 ```jsx
 const grid = useRef(null);
 
-<VirtualGrid ref={grid} rows={rows} columns={columns} />
+<VirtualGrid ref={grid} data={rows} columns={columns} />
 <button onClick={() => grid.current.scrollToCell(5000, 0)}>Go to row 5,000</button>
 ```
 
@@ -508,8 +507,8 @@ Sizes are props (`rowHeight`, `headerHeight`, `columnWidth`), and `rowClass`, `c
 ### Empty state
 
 ```jsx
-<VirtualGrid rows={rows} emptyState={({ filtered }) => filtered
-  ? <p>No matches. <button onClick={() => setFilter([])}>Clear filters</button></p>
+<VirtualGrid ref={grid} data={rows} emptyState={({ filtered }) => filtered
+  ? <p>No matches. <button onClick={() => grid.current.setQuery({ filter: [] })}>Clear filters</button></p>
   : <EmptyIllustration />} />
 ```
 
@@ -535,7 +534,7 @@ Types come from your row type:
 ```tsx
 type Customer = { id: number; name: string; amount: number; status: 'Active' | 'Closed' };
 
-<VirtualGrid<Customer> rows={customers} onSortChange={(sort) => setSort(sort)}>
+<VirtualGrid<Customer> data={customers} onQueryChange={(query) => setSort(query.sort)}>
   <Column<Customer, 'amount'> field="amount" format={(v) => v.toFixed(2)} />  {/* v: number */}
 </VirtualGrid>
 ```
@@ -555,12 +554,12 @@ const columns: ColumnDef<Customer>[] = [
 ];
 ```
 
-Type the ref as `GridApi`: `useRef<GridApi>(null)`.
+Type the ref as `Grid`: `useRef<Grid>(null)`.
 
 ## Next.js and server rendering
 
 The package is marked `'use client'`. Render `<VirtualGrid>` from a Server Component when every prop is
-serializable (`rows`, column props without functions); when you pass functions such as `renderCell`, wrap it in
+serializable (`data` as an array, column props without functions); when you pass functions such as `renderCell`, wrap it in
 your own client component. On the server the grid renders an empty container that fills in once the page loads.
 
 ```tsx
@@ -582,7 +581,7 @@ collapses to a level and `grid.current.expandAll('rows')` opens everything again
 ```jsx
 const pivot = useMemo(() => createHttpSource({ baseUrl: '/api', params: { mode: 'pivot' } }), []);
 
-<VirtualGrid dataSource={pivot} aria-label="Sales by region" onReady={(g) => setLevels(g.levels)} />
+<VirtualGrid data={pivot} aria-label="Sales by region" onReady={(g) => setLevels(g.levels)} />
 ```
 
 ## Accessibility and keyboard
@@ -626,10 +625,10 @@ again.
 ```jsx
 // ✅ Good: a new array only when the data or the search changes
 const visible = useMemo(() => orders.filter((o) => o.region === region), [orders, region]);
-<VirtualGrid rows={visible} />
+<VirtualGrid data={visible} />
 
 // ❌ Avoid: a new array on every render
-<VirtualGrid rows={orders.filter((o) => o.region === region)} />
+<VirtualGrid data={orders.filter((o) => o.region === region)} />
 ```
 
 **Keep column titles, types, widths and filters steady.** Changing one redraws the whole grid (scroll, sort and
@@ -692,10 +691,9 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 
 | Prop | Type | Default | |
 |---|---|---|---|
-| `rows` | `Row[]` | | data in memory |
-| `dataSource` | `DataSource` | | or your backend ([server data](#server-data-usedatasource)) |
+| `data` | `Row[] \| DataSource` | | rows in memory, or your backend ([server data](#server-data-usedatasource)) |
 | `getRowId` | `(row) => string \| number` | in-memory: the row itself | stable row ids ([row ids](#row-ids-getrowid)) |
-| `columns` | `ColumnDef<Row>[]` | | or `<Column>` children |
+| `columns` | `ColumnDef<Row>[]` | the first row's fields | or `<Column>` children |
 | `columnCount`, `getColumn` | `number`, `(index) => ColumnDef` | | instead of `columns`, for thousands of columns (or let the data source describe them: `getColumns`) |
 | `rowCount` | `number` | | row count when the data source has no `getLayout` |
 | `filterFns` | `{ [op]: (cellValue, value, row) => boolean }` | | custom filter operators for `rows` |
@@ -740,9 +738,8 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 
 | Prop | Type | |
 |---|---|---|
-| `sort`, `defaultSort` | `SortItem[]` | controlled, or the starting value |
-| `filter`, `defaultFilter` | `FilterItem[]` | |
-| `columnFilter`, `defaultColumnFilter` | `ColumnFilterItem[]` | which column groups are shown |
+| `query`, `defaultQuery` | `{ sort?, filter?, columnFilter? }` | controlled, or the starting value ([controlled state](#controlled-state)) |
+| `advanced` | `{ blockRows?, blockCols?, isMac? }` | rarely needed tuning |
 | `selectedCells` | `{ active, ranges }` | controlled selection |
 | `selectedRows` | `{ checks: RowCheck[] }` | checked rows |
 | `columnOrder` | `string[]` | column fields in display order (compact runs with `getColumn`) |
@@ -751,9 +748,7 @@ setRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));  // 
 
 | Prop | Receives |
 |---|---|
-| `onSortChange` | `SortItem[]` |
-| `onFilterChange` | `FilterItem[]` |
-| `onColumnFilterChange` | `ColumnFilterItem[]` |
+| `onQueryChange` | `(query, part)`: the whole query, and which part the user changed |
 | `onSelectionChange` | `{ active, ranges, text, rows, cols, cells }` |
 | `onCopy` | `{ ok, cells, rows, cols, ms, reason? }` |
 | `onColumnResize` | `{ column, key, width }`, when the user lets go |
@@ -799,8 +794,8 @@ What the `ref` gives you.
 | `getRow(rowIndex)` | the record behind a visible row, when loaded |
 | `getRowSelection()`, `setRowSelection(sel)`, `checkedCount()` | checked rows |
 | `getColumnOrder()`, `setColumnOrder(fields)` | column order |
-| `getQuery()`, `getSort()`, `getFilter()`, `getColumnFilter()` | the current sort and filters |
-| `setSort(sort)`, `setFilter(filter)`, `setColumnFilter(list)` | change uncontrolled state; resolve to `false` if refused |
+| `getQuery()` | the current sort, filter and column filter |
+| `setQuery({ sort?, filter?, columnFilter? })` | change uncontrolled parts; resolves to `false` if one was refused |
 | `toggleSort(field, additive?)` | what a header click does |
 | `openFilter(field)`, `closeFilter()` | the filter dialog |
 | `cancel()` | stop a sort or filter that is still running |
@@ -818,9 +813,8 @@ What the `ref` gives you.
 | | |
 |---|---|
 | `useDataSource(callbacks, deps)` | a data source from callbacks; when `deps` change, the grid reloads in place |
-| `useArraySource(rows, options)` | an in-memory data source you can share or pass as `dataSource` |
 | `createColumnHelper<Row>()` | typed column definitions ([TypeScript](#typescript)) |
-| `createArraySource`, `createRowSource`, `createHttpSource` | the [ready-made sources](https://github.com/borealjs/grid/tree/main/packages/grid-core#ready-made-sources) from the core package |
+| `createArraySource`, `createHttpSource` | the [ready-made sources](https://github.com/borealjs/grid/tree/main/packages/grid-core#ready-made-sources) from the core package |
 
 ## FAQ
 

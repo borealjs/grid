@@ -43,6 +43,8 @@ export interface ArraySource<R = any> extends DataSource {
   setRows(rows: R[]): void;
   /** The row at a position of the sorted / filtered view (synchronous; for cell renderers). */
   rowAt(position: number, query: Query): R | undefined;
+  /** Without `columns`: the first row's fields as columns (key and title); null for array rows or with `columns`. */
+  inferredColumns(): ColumnDef[] | null;
 }
 
 type Accessor<R> = (row: R) => unknown;
@@ -160,6 +162,11 @@ export function createArraySource<R = any>(rows: R[], { columns, filterFns = {},
     maxRectsPerRequest: 1000,
     maxCellsPerRequest: 200_000,
     get rows() { return data; },
+    inferredColumns() {
+      const first = data[0] as unknown;
+      if (columns || !first || typeof first !== 'object' || Array.isArray(first)) return null;
+      return Object.keys(first).map((key) => ({ key, title: key }));
+    },
     setRows(next) {
       data = next;
       if (!columns) setColumns();

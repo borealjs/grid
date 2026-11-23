@@ -273,6 +273,10 @@ export interface DataSource<V = unknown> {
   maxRectsPerRequest?: number;
   /** Cells per getCells call (default 20,000). */
   maxCellsPerRequest?: number;
+  /** getRows sources: rows per request (default 100). */
+  pageSize?: number;
+  /** getRows sources: pages of rows kept in memory (default 300). */
+  maxPages?: number;
 }
 
 // ------------------------------------------------------------------ columns and hooks
@@ -528,15 +532,25 @@ export interface RowHeaderOptions {
   label?(row: number): string;
 }
 
-/** Which parts of the query the owner controls (on…Change only reports; apply with setSort etc.). */
-export interface ControlledParts {
-  sort?: boolean;
-  filter?: boolean;
-  columnFilter?: boolean;
+/** The parts of the query: what onQueryChange says changed. */
+export type QueryPart = 'sort' | 'filter' | 'columnFilter';
+
+/** Rarely needed tuning. */
+export interface AdvancedOptions {
+  /** Rows / columns per cached data block (default 100 × 20). */
+  blockRows?: number;
+  blockCols?: number;
+  /** Use ⌘ (true) or Ctrl (false) for shortcuts; detected from the platform by default. */
+  isMac?: boolean;
 }
 
 export interface GridOptions<V = unknown> {
-  dataSource: DataSource<V>;
+  /**
+   * The data: an array of rows (sorted, filtered and searched in the browser), or a data source for your
+   * backend: `{ getRows }` (rows by offset / limit), `{ getCells }` (cells by rectangle, any size), or
+   * createHttpSource for the reference protocol.
+   */
+  data: DataSource<V> | readonly any[];
   /**
    * A row's stable id. The selection then follows rows through sorts, filters and refreshes (instead of
    * staying at the same position), and checked rows are kept by id. In-memory rows default to the row itself.
@@ -584,15 +598,14 @@ export interface GridOptions<V = unknown> {
   /** Built-in notice for refused or failed sorts and filters (turn off if you show onViewChange yourself). */
   notices?: boolean;
 
-  // Query: initial (uncontrolled) or the current value (with `controlled`)
-  sort?: SortItem[];
-  filter?: FilterItem[];
-  columnFilter?: ColumnFilterItem[];
-  defaultSort?: SortItem[];
-  defaultFilter?: FilterItem[];
-  defaultColumnFilter?: ColumnFilterItem[];
-  /** Controlled parts only report user changes (on…Change); apply them with setSort etc. */
-  controlled?: ControlledParts;
+  // Query: sort, row filter and column filter
+  /** The query to start with. */
+  defaultQuery?: Partial<Query>;
+  /**
+   * The current query, owned by you: the parts it has (sort, filter, columnFilter) are controlled. User
+   * changes to them are only reported (onQueryChange); the grid shows what you pass back here.
+   */
+  query?: Partial<Query>;
   /** Checked rows (with rowSelection). Applied when it changes; onRowSelectionChange reports clicks. */
   selectedRows?: RowSelection;
   /**
@@ -615,9 +628,11 @@ export interface GridOptions<V = unknown> {
   renderEmpty?: Renderer<EmptyContext>;
 
   // Events
-  onSortChange?(sort: SortItem[]): void;
-  onFilterChange?(filter: FilterItem[]): void;
-  onColumnFilterChange?(columnFilter: ColumnFilterItem[]): void;
+  /**
+   * The user sorted or filtered (`part` says which). Uncontrolled: reported once applied. Controlled (that
+   * part is in `query`): the query the user asked for, to pass back as `query`.
+   */
+  onQueryChange?(query: Query, part: QueryPart): void;
   onSelectionChange?(info: SelectionInfo): void;
   onCopy?(info: CopyInfo): void;
   onColumnResize?(info: ColumnResizeInfo): void;
@@ -632,15 +647,9 @@ export interface GridOptions<V = unknown> {
   onError?(error: unknown, context: ErrorContext): void;
   onReady?(grid: Grid): void;
 
-  // Tuning (rarely needed)
-  /** Rows / columns per cached data block (default 100 × 20). */
-  blockRows?: number;
-  blockCols?: number;
-  /** Use ⌘ (true) or Ctrl (false) for shortcuts; detected from the platform by default. */
-  isMac?: boolean;
+  /** Rarely needed tuning: data block size, shortcut modifier. */
+  advanced?: AdvancedOptions;
 
-  /** Low-level: a custom layout model (see GridModel). May change in any release. */
-  model?: unknown;
 }
 
 // ------------------------------------------------------------------ grid state
@@ -671,6 +680,10 @@ export interface GridStats {
   rowWrites: number;
   cellWrites: number;
   cache: CacheStats & { cached: number; inflight: number; queued: number };
+  /** Merged cells set from code (setMerges) and reported by the data source. */
+  merges: { code: number; server: number };
+  /** How much the scrollbars are scaled down: 1 = exact; above 1 when the grid is taller or wider than a browser can scroll. */
+  scrollScale: { x: number; y: number };
 }
 
 export interface CacheStats {

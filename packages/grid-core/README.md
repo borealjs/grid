@@ -68,7 +68,7 @@ The package is published as ES modules and runs in all current browsers (Chrome,
 **2. Describe your columns and create the grid.**
 
 ```js
-import { createGrid, createArraySource } from '@borealjs/grid-core';
+import { createGrid } from '@borealjs/grid-core';
 import '@borealjs/grid-core/style.css';
 
 const rows = [
@@ -86,10 +86,10 @@ const columns = [
 ];
 
 const grid = createGrid(document.getElementById('grid'), {
-  dataSource: createArraySource(rows, { columns }),
+  data: rows,
   columns,
   ariaLabel: 'Customers',
-  onSortChange: (sort) => console.log(sort), // [{ column: 3, key: 'amount', direction: 'desc' }]
+  onQueryChange: (query) => console.log(query.sort), // [{ column: 3, key: 'amount', direction: 'desc' }]
 });
 ```
 
@@ -109,17 +109,22 @@ Load the module and the stylesheet straight from a CDN:
 <div id="grid" style="height: 400px"></div>
 
 <script type="module">
-  import { createGrid, createArraySource } from 'https://cdn.jsdelivr.net/npm/@borealjs/grid-core@0.1.1/+esm';
+  import { createGrid } from 'https://cdn.jsdelivr.net/npm/@borealjs/grid-core@0.1.1/+esm';
 
   const columns = [{ key: 'name', title: 'Name' }, { key: 'city', title: 'City', filter: 'values' }];
   const rows = [{ name: 'Ada', city: 'London' }, { name: 'Grace', city: 'New York' }];
-  createGrid(document.getElementById('grid'), { dataSource: createArraySource(rows, { columns }), columns });
+  createGrid(document.getElementById('grid'), { data: rows, columns });
 </script>
 ```
 
 Pin the version in the URL so an update never changes your page unexpectedly.
 
 ## Columns and cells
+
+Columns are optional. Without them, each field of the first row becomes a column titled with its name: from an
+array as `data`, or from the first page a `{ getRows }` source returns (rows that are arrays get one column
+per position). New rows with other fields bring their own columns. Pass `columns` for titles, types, widths,
+formats and filters, or let a server describe them with [`getColumns`](#very-wide-tables).
 
 ```js
 {
@@ -181,7 +186,7 @@ const dataSource = {
     return res.json(); // [{ key, title, type: 'number', filter: 'number', width: 90, group: 'Amount' }, …]
   },
 };
-createGrid(el, { dataSource, columnChooser: true });
+createGrid(el, { data: dataSource, columnChooser: true });
 ```
 
 Each column keeps its title, type, alignment, filter, width and group, and only the columns on screen are
@@ -203,7 +208,7 @@ it at the right edge, which suits row actions, a status or a total. Users can dr
 
 ```js
 createGrid(el, {
-  dataSource,
+  data: dataSource,
   columns: [{ key: 'id', pinned: true }, { key: 'name', pinned: true }, { key: 'amount' }, { key: 'actions', pinned: 'right', reorderable: false }],
   columnOrder: saved,                                   // keys in display order
   onColumnOrderChange: (order) => localStorage.setItem('order', JSON.stringify(order)),
@@ -251,7 +256,7 @@ returns `false` to turn that one off:
 
 ```js
 createGrid(el, {
-  dataSource,
+  data: dataSource,
   columns,
   // Columns: { axis: 'cols', column, key }. Pivot row levels: { axis: 'rows', level }.
   sortable: (target) => target.key !== 'notes',
@@ -277,7 +282,7 @@ createGrid(el, {
 }
 
 // With in-memory rows, say what the operator means:
-createArraySource(rows, { columns, filterFns: { atLeast: (cellValue, min) => cellValue >= min } });
+createGrid(el, { data: createArraySource(rows, { columns, filterFns: { atLeast: (cellValue, min) => cellValue >= min } }), columns });
 ```
 
 `api` has `value`, `setValue(value)`, `apply(value?)`, `clear()`, `close()`, `column` and `title`. A server
@@ -313,7 +318,7 @@ const dataSource = {
   },
 };
 
-createGrid(el, { dataSource, columns });
+createGrid(el, { data: dataSource, columns });
 ```
 
 A rect is `{ row, col, rowCount, colCount }`: rows are positions in the sorted and filtered result, columns are
@@ -349,7 +354,7 @@ const dataSource = {
   },
 };
 
-createGrid(el, { dataSource, columns, getRowId: (row) => row.id });
+createGrid(el, { data: dataSource, columns, getRowId: (row) => row.id });
 ```
 
 `limit` is the page size (100). With SQL, `filter` becomes a parameterized `WHERE`, `sort` an `ORDER BY` (add a
@@ -358,7 +363,7 @@ column names through an allow-list on the server; never put client text into SQL
 
 Know where it stops: most databases walk past every skipped row for `OFFSET`, so pages deep into a huge table
 get slow, and a row object has to carry every column, which does not work for thousands of columns. For those,
-use `getCells`. `createRowSource({ getRows, columns, pageSize })` makes the same data source explicitly.
+use `getCells`. Set `pageSize` on the data source to change how many rows each request asks for (default 100).
 
 ### Rows by id
 
@@ -401,11 +406,11 @@ If your backend can't sort or filter very large tables at all, return `maxSortRo
 
 ### Ready-made sources
 
-- **`createArraySource(rows, options)`** sorts, filters and searches rows in memory (objects, or arrays
-  addressed by position). Text sorts naturally ("Item 2" before "Item 10") and empty values go last. After
-  `source.setRows(newRows)`, call `grid.refresh()`.
-- **`createRowSource({ getRows, columns, pageSize, indexOfRow })`** loads rows by offset / limit (see
-  [rows by offset / limit](#rows-by-offset--limit)).
+- **An array** as `data` is sorted, filtered and searched in memory (objects, or arrays addressed by
+  position). Text sorts naturally ("Item 2" before "Item 10") and empty values go last. Pass a new array with
+  `grid.setOptions({ data })` and the grid keeps its scroll position, sort and filters.
+- **`createArraySource(rows, options)`** is the same in-memory source as an object of its own, for custom
+  filter functions (`filterFns`), a custom `compare`, or `source.setRows(newRows)` followed by `grid.refresh()`.
 - **`createHttpSource({ baseUrl, params, headers, fetch })`** talks to a server that implements this HTTP
   API. `params` are added to every request. The query is sent as `sort` (for example `3:d,L1:a`: a column
   index, or `L` and a pivot row level, then `a` or `d`) and as `filter` / `colfilter` (JSON lists of
@@ -431,7 +436,7 @@ that are not on screen first.
 
 ```js
 createGrid(el, {
-  dataSource,
+  data: dataSource,
   columns,
   selection: 'single', // 'multi' (default) | 'single' | 'none'
   onSelectionChange: (info) => console.log(info.active, info.cells),
@@ -446,7 +451,7 @@ checks a range, and Space checks the active row.
 
 ```js
 const grid = createGrid(el, {
-  dataSource, columns, getRowId: (row) => row.id,
+  data: dataSource, columns, getRowId: (row) => row.id,
   rowSelection: true,
   onRowSelectionChange: (sel) => console.log(sel.checks, grid.checkedCount()),
 });
@@ -472,7 +477,7 @@ checked.
 
 ```js
 createGrid(el, {
-  dataSource, columns,
+  data: dataSource, columns,
   onCellClick: ({ row, key, value }) => showDetail(row),
   onCellDoubleClick: ({ row }) => openEditor(row),
   onCellContextMenu: ({ row, event }) => {
@@ -488,21 +493,24 @@ opens the menu for the active cell. Clicks on links, buttons and inputs in cells
 
 ## Controlled state
 
-By default the grid keeps its own sort and filters. To own them yourself (to store them in the URL, say),
-mark them controlled. The grid then only reports what the user asked for, and you apply it:
+By default the grid keeps its own sort and filters; `defaultQuery` sets where they start. To own them yourself
+(to store them in the URL, say), pass `query`. The parts it has (`sort`, `filter`, `columnFilter`) are then
+yours: the grid only reports what the user asked for, and shows what you pass back:
 
 ```js
 const grid = createGrid(el, {
-  dataSource,
+  data,
   columns,
-  sort: [{ key: 'amount', direction: 'desc' }],
-  controlled: { sort: true },
-  onSortChange(sort) {
-    saveToUrl(sort);
-    grid.setSort(sort);
+  query: { sort: [{ key: 'amount', direction: 'desc' }] }, // the sort is controlled, the filters are not
+  onQueryChange(query, part) {
+    saveToUrl(query);
+    grid.setOptions({ query: { sort: query.sort } });
   },
 });
 ```
+
+`grid.setQuery({ filter: [] })` changes the query from code (only the parts you give), and `grid.getQuery()`
+returns all of it.
 
 Sort and filter items may name a column by `key` or by `column` index.
 
@@ -534,7 +542,7 @@ Every text the grid shows is in `messages`. Pass the ones you want to change:
 
 ```js
 createGrid(el, {
-  dataSource,
+  data: dataSource,
   columns,
   messages: {
     noRows: 'Keine Zeilen',
@@ -565,6 +573,11 @@ async getLayout() {
 In `getCells`, rows and columns are positions in the fully expanded trees, so they stay the same when groups
 collapse. `grid.showLevel('rows', 0)` collapses to a level and `grid.expandAll('rows')` opens everything again.
 See the `TreeSpec` type for all fields.
+
+`TreeAxis` turns a `TreeSpec` into those positions, which helps when you build a pivot data source or place
+merged cells: `new TreeAxis(spec).fullItemStart[level][group]` is where a group starts in the fully expanded
+tree, `fullItems[level][group]` how many positions it covers (its subtotal is the last), and `locate(i)` says
+what position `i` is. The reference server uses it to answer `getCells` for a pivot.
 
 ## Keyboard
 
@@ -597,9 +610,9 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 
 | Option | Type | Default | |
 |---|---|---|---|
-| `dataSource` | `DataSource` | required | where the data comes from ([server data](#server-data), [ready-made sources](#ready-made-sources)) |
+| `data` | `Row[] \| DataSource` | required | the rows, or a data source for your backend ([server data](#server-data), [ready-made sources](#ready-made-sources)) |
 | `getRowId` | `(row) => string \| number` | in-memory: the row itself | stable row ids ([rows by id](#rows-by-id)) |
-| `columns` | `ColumnDef[]` | | the columns ([column options](#column-options)) |
+| `columns` | `ColumnDef[]` | the first row's fields | the columns ([column options](#column-options)) |
 | `columnCount`, `getColumn` | `number`, `(index) => ColumnDef` | | instead of `columns`, for thousands of columns ([very wide tables](#very-wide-tables)) |
 | `rowCount` | `number` | | row count when the data source has no `getLayout` (filtering is then off) |
 | `layout` | `Layout` | | a layout you already have, to skip the first `getLayout` call |
@@ -637,13 +650,14 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `format`, `cellClass`, `renderCell`, `renderHeader` | | | defaults for columns without their own |
 | `rowClass` | `(rowIndex) => string` | | a class per row |
 | `renderEmpty` | `(el, { filtered }) => void \| cleanup` | "No rows" | the empty state |
+| `advanced` | `{ blockRows?, blockCols?, isMac? }` | 100 × 20, detected | rarely needed tuning: cells per cached block, ⌘ or Ctrl for shortcuts |
 
 #### Sort and filter
 
 | Option | Type | |
 |---|---|---|
-| `sort`, `filter`, `columnFilter` | `SortItem[]`, `FilterItem[]`, `ColumnFilterItem[]` | the starting sort and filters |
-| `controlled` | `{ sort?, filter?, columnFilter? }` | make them [controlled](#controlled-state) |
+| `defaultQuery` | `{ sort?, filter?, columnFilter? }` | the sort and filters to start with |
+| `query` | `{ sort?, filter?, columnFilter? }` | the current sort and filters, owned by you ([controlled state](#controlled-state)) |
 | `selectedRows` | `{ checks: RowCheck[] }` | checked rows (applied when it changes) |
 | `columnOrder` | `(string \| number \| [first, last])[]` | column keys in display order (compact runs for `getColumn` tables) |
 | `pinnedColumns` | `number` | columns marked `pinned` | pin this many leading columns |
@@ -653,9 +667,7 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 
 | Option | Receives |
 |---|---|
-| `onSortChange` | `SortItem[]` |
-| `onFilterChange` | `FilterItem[]` |
-| `onColumnFilterChange` | `ColumnFilterItem[]` |
+| `onQueryChange` | `(query, part)`: the whole query, and which part (`'sort'`, `'filter'`, `'columnFilter'`) the user changed |
 | `onSelectionChange` | `{ active, text, ranges, rows, cols, cells }` |
 | `onCopy` | `{ ok, cells, rows, cols, ms, reason? }` |
 | `onColumnResize` | `{ column, key, width }`, when the user lets go |
@@ -699,8 +711,8 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `getRowSelection()`, `setRowSelection(sel)`, `checkedCount()` | checked rows |
 | `getColumnOrder()`, `setColumnOrder(keys)` | column order |
 | `repaint()` | redraw cells (your `format` or `renderCell` output changed) |
-| `getQuery()`, `getSort()`, `getFilter()`, `getColumnFilter()` | the current sort and filters |
-| `setSort(sort)`, `setFilter(filter)`, `setColumnFilter(list)` | change them; resolve to `false` if refused |
+| `getQuery()` | the current sort, filter and column filter |
+| `setQuery({ sort?, filter?, columnFilter? })` | change the parts given; resolves to `false` if one was refused |
 | `toggleSort(column, additive?)` | what a header click does |
 | `openFilter(column)`, `closeFilter()` | the filter dialog |
 | `cancel()` | stop a sort or filter that is still running |
@@ -712,7 +724,7 @@ Creates a grid inside `host` and returns its [API](#grid-methods).
 | `setMerges(merges)` | merged cells: `[{ r0, c0, nr, nc, label? }]` |
 | `rowCount`, `columnCount`, `visibleRange` | sizes and what is on screen |
 | `levels`, `showLevel(axis, level)`, `expandAll(axis)`, `toggleGroup(axis, level, group)` | pivots |
-| `stats()` | render and cache counters, for profiling |
+| `stats()` | render and cache counters, merged-cell counts and the scrollbar scale, for profiling |
 | `focus()`, `destroy()` | |
 
 ### Data source
@@ -737,9 +749,9 @@ Every option, callback and data source shape has a type, exported by name: `Grid
 more. They are generated from the source, so they always match the code. `createArraySource<Row>(rows)` types
 `setRows`, `rowAt` and each column's `value(row)`.
 
-The low-level pieces (`GridEngine`, `createTableModel`, `createPivotModel`, `GridModel`, the axes and `BlockCache`)
-are exported for custom layouts and tooling, and may change in any release. `GridEngine` was exported as
-`VirtualGrid` before 0.2; that name still works but is deprecated, since the React component has the same name.
+Everything else (the engine, the table and pivot models, the block cache) is private: the package exports only
+what is documented here, so it can change inside without breaking you. If you need something the API does not
+offer, [open an issue](https://github.com/borealjs/grid/issues).
 
 ## FAQ
 

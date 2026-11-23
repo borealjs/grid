@@ -38,7 +38,7 @@ test.describe('automated (axe)', () => {
   test('sorted and filtered table has no violations', async ({ page }) => {
     await table(page);
     await sortBtn(page, /Amount/).click();
-    await page.evaluate(() => window.__grid.setFilter([{ column: 2, key: 'city', op: 'in', values: ['Oslo'] }]));
+    await page.evaluate(() => window.__grid.setQuery({ filter: [{ column: 2, key: 'city', op: 'in', values: ['Oslo'] }] }));
     await expect(grid(page)).toHaveAttribute('aria-rowcount', '51');
     expect(await scan(page)).toEqual([]);
   });
@@ -103,7 +103,7 @@ test.describe('structure', () => {
 
   test('aria-rowcount follows filtering', async ({ page }) => {
     await table(page);
-    await page.evaluate(() => window.__grid.setFilter([{ column: 2, key: 'city', op: 'in', values: ['Oslo'] }]));
+    await page.evaluate(() => window.__grid.setQuery({ filter: [{ column: 2, key: 'city', op: 'in', values: ['Oslo'] }] }));
     await expect(grid(page)).toHaveAttribute('aria-rowcount', '51');
   });
 
@@ -156,7 +156,7 @@ test.describe('structure', () => {
     await open(page, 'controlled.html', '?rows=0');
     await expect(page.locator('.vg-empty')).toHaveAttribute('aria-live', 'polite');
     await open(page, 'controlled.html');
-    await page.evaluate(() => { window.__ctl.fail = true; return window.__grid.setSort([{ column: 3, key: 'amount', direction: 'asc' }]); });
+    await page.evaluate(() => { window.__ctl.fail = true; return window.__grid.setQuery({ sort: [{ column: 3, key: 'amount', direction: 'asc' }] }); });
     const n = page.locator('.vg-notice:not(.vg-work)');
     await expect(n).toHaveAttribute('role', 'status');
     await expect(n).toHaveAttribute('aria-live', 'polite');

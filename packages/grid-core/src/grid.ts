@@ -2,33 +2,39 @@
 // source's layout, wires the data source into the engine, and exposes a small, stable API in the
 // public query format. Options can change later with setOptions (callbacks are always the latest ones).
 
-import { GridEngine, type BlockPayload, type GatherPayload } from './engine/engine.js';
+import { GridEngine, type BlockPayload, type ControlledParts, type GatherPayload } from './engine/engine.js';
 import { createPivotModel } from './model/pivot.js';
 import { createTableModel } from './model/table.js';
 import { createRowSource, type RowSource } from './sources/rows.js';
+import { createArraySource, type ArraySource } from './sources/array.js';
 import type { GridModel } from './model/types.js';
 import {
   columnFilterFromPublic, columnFilterToPublic, filterFromPublic, filterParamOf, filterToPublic, sortFromPublic, sortToPublic, type ViewKey,
 } from './query.js';
 import type {
-  CellRect, CellsResult, ColumnFilterItem, CopyInfo, DataSource, ErrorContext, FilterItem, GridOptions, GridStats, Layout, Merge, PivotLayout,
-  PivotLevels, Query, RowId, RowSelection, Selection, SelectionInfo, SelectionRange, SortItem, TableLayout, Theme, VisibleRange,
+  CellRect, CellsResult, ColumnDef, CopyInfo, DataSource, ErrorContext, GridOptions, GridStats, Layout, Merge, PivotLayout,
+  PivotLevels, Query, QueryPart, RowId, RowSelection, Selection, SelectionInfo, SelectionRange, TableLayout, Theme, VisibleRange,
 } from './types.js';
 
 type OptionKey = keyof GridOptions;
 
 /** Event callbacks: always called in their latest version, so changing them never rebuilds. */
 const CALLBACKS = [
-  'onSortChange', 'onFilterChange', 'onColumnFilterChange', 'onSelectionChange', 'onCopy', 'onError', 'onViewChange', 'onColumnResize', 'onReady',
+  'onQueryChange', 'onSelectionChange', 'onCopy', 'onError', 'onViewChange', 'onColumnResize', 'onReady',
   'onRowSelectionChange', 'onCellClick', 'onCellDoubleClick', 'onCellContextMenu', 'onColumnOrderChange',
 ] as const satisfies readonly OptionKey[];
 /** Cell / header hooks: changing them redraws (adding or removing one rebuilds). */
 const HOOKS = ['format', 'cellClass', 'renderCell', 'renderHeader', 'renderEmpty', 'rowClass'] as const satisfies readonly OptionKey[];
-const QUERY_KEYS = ['sort', 'filter', 'columnFilter'] as const satisfies readonly OptionKey[];
+const QUERY_PARTS = ['columnFilter', 'filter', 'sort'] as const satisfies readonly QueryPart[]; // the order they are applied in
 /** Options applied in place, without a rebuild. */
 const LIVE_KEYS = new Set<OptionKey>([
-  ...CALLBACKS, ...HOOKS, ...QUERY_KEYS, 'theme', 'controlled', 'ariaLabel', 'defaultSort', 'defaultFilter', 'defaultColumnFilter', 'selectedRows', 'columnOrder', 'getRowId',
+  ...CALLBACKS, ...HOOKS, 'query', 'defaultQuery', 'theme', 'ariaLabel', 'selectedRows', 'columnOrder', 'getRowId',
 ]);
+/** The parts of `query` the owner controls: the ones it has. */
+const controlledOf = (query: Partial<Query> | undefined): ControlledParts => ({
+  sort: query?.sort !== undefined, filter: query?.filter !== undefined, columnFilter: query?.columnFilter !== undefined,
+});
+const sameJson = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
 const THEMES: readonly Theme[] = ['auto', 'light', 'dark'];
 const MAX_SORT_KEYS = 4;
 
@@ -87,18 +93,21 @@ export class Grid {
   #source: Partial<DataSource> = {};
   /** `{ getRows }` sources get a row source around them (kept per object, so its cache survives rebuilds). */
   readonly #wrapped = new WeakMap<object, RowSource>();
+  /** `data` given as an array: an in-memory source around it (new arrays go in with setRows). */
+  #arrayWrap: { source: ArraySource; columns: unknown } | null = null;
+  /** No columns given: the ones the data source took from its rows (fields as keys and titles). */
+  #inferred: ColumnDef<any>[] | null = null;
 
   constructor(host: HTMLElement, options: GridOptions<any>) {
     if (!host || typeof host.appendChild !== 'function') throw new TypeError('createGrid: the first argument must be an element');
-    const ds = options?.dataSource;
-    if (!options?.model && typeof ds?.getCells !== 'function' && typeof ds?.getRows !== 'function') throw new TypeError('createGrid: the data source needs `getRows` or `getCells`');
+    const ds = options?.data as Partial<DataSource> | readonly unknown[] | undefined;
+    if (!Array.isArray(ds) && typeof (ds as Partial<DataSource>)?.getCells !== 'function' && typeof (ds as Partial<DataSource>)?.getRows !== 'function') {
+      throw new TypeError('createGrid: `data` must be an array of rows or a data source with `getRows` or `getCells`');
+    }
     this.#host = host;
     this.#opts = { ...options };
     this.ready = this.#build();
   }
-
-  /** Low-level access to the engine (models, axes, caches). Undefined until ready. May change in any release. */
-  get engine(): GridEngine | undefined { return this.#engine ?? undefined; }
 
   /** A copy of the current options. */
   get options(): GridOptions { return { ...this.#opts }; }
@@ -108,35 +117,34 @@ export class Grid {
     const o = this.#opts;
     const source = this.#resolveSource();
     this.#source = source;
-    const keyIndex = Array.isArray(o.columns) ? new Map(o.columns.map((d, i) => [d.key, i])) : null;
-    const colOfKey = (k: string | undefined) => keyIndex?.get(k) ?? -1;
-    const keyOf = (c: number) => (Array.isArray(o.columns) ? o.columns[c]?.key : undefined);
+    this.#inferred = this.#inferColumns(source); // in-memory rows know theirs now; getRows sources after the first page
+    const colOfKey = (k: string | undefined) => this.#columnList()?.findIndex((d) => d.key === k) ?? -1;
+    const keyOf = (c: number) => this.#columnList()?.[c]?.key;
     const initial = {
-      sort: sortFromPublic(keep?.query.sort ?? o.sort ?? o.defaultSort, colOfKey).slice(0, MAX_SORT_KEYS),
-      filter: filterFromPublic(keep?.query.filter ?? o.filter ?? o.defaultFilter, colOfKey),
-      columnFilter: columnFilterFromPublic(keep?.query.columnFilter ?? o.columnFilter ?? o.defaultColumnFilter),
+      sort: sortFromPublic(keep?.query.sort ?? o.query?.sort ?? o.defaultQuery?.sort, colOfKey).slice(0, MAX_SORT_KEYS),
+      filter: filterFromPublic(keep?.query.filter ?? o.query?.filter ?? o.defaultQuery?.filter, colOfKey),
+      columnFilter: columnFilterFromPublic(keep?.query.columnFilter ?? o.query?.columnFilter ?? o.defaultQuery?.columnFilter),
     };
     const initialQuery: Query = { sort: sortToPublic(initial.sort, keyOf), filter: filterToPublic(initial.filter, keyOf), columnFilter: columnFilterToPublic(initial.columnFilter) };
     const params = { filter: filterParamOf(initial.filter), colfilter: filterParamOf(initial.columnFilter) };
 
-    let model = o.model as GridModel | undefined;
-    if (!model) {
-      let layout = o.layout;
-      if (!layout) {
-        try {
-          layout = typeof source.getLayout === 'function' ? await source.getLayout({ query: initialQuery }) : { rowCount: o.rowCount ?? 0 };
-        } catch (err) {
-          if (seq === this.#buildSeq && !this.#destroyed) this.#error(err, { kind: 'layout' });
-          throw err;
-        }
+    let layout = o.layout;
+    if (!layout) {
+      try {
+        layout = typeof source.getLayout === 'function' ? await source.getLayout({ query: initialQuery }) : { rowCount: o.rowCount ?? 0 };
+      } catch (err) {
+        if (seq === this.#buildSeq && !this.#destroyed) this.#error(err, { kind: 'layout' });
+        throw err;
       }
-      if (seq !== this.#buildSeq || this.#destroyed) return;
-      const modelOptions = this.#hookOptions();
-      if (keep?.columnOrder) modelOptions.columnOrder = keep.columnOrder;
-      model = isPivotLayout(layout)
-        ? createPivotModel(layout, source as DataSource, modelOptions, params)
-        : createTableModel(modelOptions, layout as TableLayout, source as DataSource, params);
     }
+    if (seq !== this.#buildSeq || this.#destroyed) return;
+    this.#inferred = this.#inferColumns(source);
+    const modelOptions = this.#hookOptions();
+    if (this.#inferred) modelOptions.columns = this.#inferred;
+    if (keep?.columnOrder) modelOptions.columnOrder = keep.columnOrder;
+    const model: GridModel = isPivotLayout(layout)
+      ? createPivotModel(layout, source as DataSource, modelOptions, params)
+      : createTableModel(modelOptions, layout as TableLayout, source as DataSource, params);
     if (seq !== this.#buildSeq || this.#destroyed) return;
 
     this.#engine?.destroy();
@@ -149,7 +157,7 @@ export class Grid {
     const currentQuery = () => this.#engine?.query ?? initialQuery;
     const keyOfSource = (s: number) => this.#engine?.model.keyOf?.(s) ?? keyOf(s) ?? s;
     // Column lists report their order as keys; very wide tables keep the compact form.
-    const publicOrder = (order: (number | [number, number])[]) => (Array.isArray(o.columns) ? expandOrder(order).map(keyOfSource) : order);
+    const publicOrder = (order: (number | [number, number])[]) => (this.#columnList() ? expandOrder(order).map(keyOfSource) : order);
     const canGather = (source.maxRectsPerRequest ?? 400) > 1;
     const engine = new GridEngine(this.#host, {
       model,
@@ -169,12 +177,12 @@ export class Grid {
       keyboard: o.keyboard !== false,
       notices: o.notices !== false,
       minColWidth: o.minColumnWidth ?? 48,
-      blockRows: o.blockRows ?? 100,
-      blockCols: o.blockCols ?? 20,
+      blockRows: o.advanced?.blockRows ?? 100,
+      blockCols: o.advanced?.blockCols ?? 20,
       maxGatherRects: source.maxRectsPerRequest ?? 400,
       maxGatherCells: source.maxCellsPerRequest ?? 20_000,
-      controlled: o.controlled,
-      isMac: o.isMac,
+      controlled: controlledOf(o.query),
+      isMac: o.advanced?.isMac,
       format: o.format && ((v, ctx) => this.#opts.format?.(v, ctx) ?? ''),
       cellClass: o.cellClass && ((v, ctx) => this.#opts.cellClass?.(v, ctx)),
       renderCell: o.renderCell && ((el, ctx) => this.#opts.renderCell?.(el, ctx)),
@@ -218,12 +226,27 @@ export class Grid {
     this.#opts.onReady?.(this);
   }
 
-  /** The data source to use: `{ getRows }` gets a row source around it that reads cells by column key. */
+  /**
+   * The data source to use: an array gets an in-memory source around it, and `{ getRows }` a row source that
+   * reads cells by column key.
+   */
   #resolveSource(): Partial<DataSource> {
     const o = this.#opts;
-    const src = o.dataSource as Partial<DataSource> | undefined;
+    if (Array.isArray(o.data)) {
+      const w = this.#arrayWrap;
+      if (w && w.columns === o.columns) {
+        if (w.source.rows !== o.data) w.source.setRows(o.data as unknown[]);
+        return w.source;
+      }
+      const source = createArraySource(o.data as unknown[], { columns: Array.isArray(o.columns) ? (o.columns as never) : undefined });
+      this.#arrayWrap = { source, columns: o.columns };
+      return source;
+    }
+    const src = o.data as Partial<DataSource> | undefined;
     if (!src) return {};
-    const columns = Array.isArray(o.columns) ? o.columns : (i: number) => o.getColumn?.(i) ?? {};
+    // No columns at all: the row source takes them from the first row it loads.
+    const given = Array.isArray(o.columns) || typeof o.getColumn === 'function';
+    const columns = !given ? undefined : Array.isArray(o.columns) ? o.columns : (i: number) => o.getColumn?.(i) ?? {};
     if (typeof src.getCells === 'function') {
       if (isRowSource(src) && !src.hasColumns) src.setColumns(columns);
       return src;
@@ -232,6 +255,8 @@ export class Grid {
     let wrapped = this.#wrapped.get(src);
     if (!wrapped) {
       wrapped = createRowSource({
+        pageSize: src.pageSize,
+        maxPages: src.maxPages,
         getRows: (req) => src.getRows!(req),
         getFilterValues: typeof src.getFilterValues === 'function' ? (req) => src.getFilterValues!(req) : undefined,
         indexOfRow: typeof src.indexOfRow === 'function'
@@ -263,21 +288,29 @@ export class Grid {
 
   /**
    * Change options after creation. Callbacks and render/format functions take effect at once (cells are
-   * redrawn); sort / filter / columnFilter are applied like setSort etc.; theme switches in place;
-   * anything structural (dataSource, columns, sizes, feature switches) rebuilds the grid and keeps its
-   * scroll position and query.
+   * redrawn); `query` is applied like setQuery; a new `data` array goes in place (same columns); theme
+   * switches in place; anything structural (the data source, columns, sizes, feature switches) rebuilds the
+   * grid and keeps its scroll position and query.
    */
   setOptions(next: Partial<GridOptions<any>>): Promise<void> {
     const prev = this.#opts;
     const changed = (Object.keys(next) as OptionKey[]).filter((k) => next[k] !== prev[k]);
     if (!changed.length) return Promise.resolve();
     this.#opts = { ...prev, ...next };
+    // New rows for in-memory data: keep scroll, sort and filter, reload what is visible.
+    const newRows = changed.includes('data') && Array.isArray(prev.data) && Array.isArray(next.data) && !changed.includes('columns');
+    if (newRows && this.#engine) {
+      const rest = changed.filter((k) => k !== 'data');
+      this.#resolveSource();
+      const refreshed = this.refresh();
+      return rest.length ? Promise.all([refreshed, this.setOptions(Object.fromEntries(rest.map((k) => [k, next[k]])))]).then(() => undefined) : refreshed;
+    }
     const structural = changed.some((k) => !LIVE_KEYS.has(k));
     const hookPresence = changed.some((k) => (HOOKS as readonly OptionKey[]).includes(k) && typeof prev[k] !== typeof next[k]);
     const idPresence = changed.includes('getRowId') && typeof prev.getRowId !== typeof next.getRowId;
     if (structural || hookPresence || idPresence || !this.#engine) return this.rebuild();
     const e = this.#engine;
-    if (changed.includes('controlled')) e.o.controlled = this.#opts.controlled;
+    if (changed.includes('query')) e.o.controlled = controlledOf(this.#opts.query);
     if (changed.includes('ariaLabel')) {
       e.o.ariaLabel = next.ariaLabel;
       if (next.ariaLabel) e.scroller.setAttribute('aria-label', next.ariaLabel);
@@ -292,11 +325,13 @@ export class Grid {
     if (changed.some((k) => (HOOKS as readonly OptionKey[]).includes(k))) e.repaint();
     if (changed.includes('selectedRows') && next.selectedRows) e.setRowSelection(next.selectedRows);
     if (changed.includes('columnOrder') && Array.isArray(next.columnOrder)) e.setColumnOrder(next.columnOrder);
-    const tasks: Promise<boolean>[] = [];
-    if (changed.includes('columnFilter')) tasks.push(this.setColumnFilter(next.columnFilter ?? []));
-    if (changed.includes('filter')) tasks.push(this.setFilter(next.filter ?? []));
-    if (changed.includes('sort')) tasks.push(this.setSort(next.sort ?? []));
-    return Promise.all(tasks).then(() => undefined);
+    // Controlled query: apply the parts that differ from what the grid shows.
+    if (changed.includes('query') && next.query) {
+      const current = e.getQuery();
+      const parts = Object.fromEntries(QUERY_PARTS.filter((k) => next.query![k] !== undefined && !sameJson(next.query![k], current[k])).map((k) => [k, next.query![k]]));
+      if (Object.keys(parts).length) return this.setQuery(parts).then(() => undefined);
+    }
+    return Promise.resolve();
   }
 
   /** Build again from the current options (keeps the scroll position and the query). */
@@ -310,34 +345,27 @@ export class Grid {
   // ---------------------------------------------------------------- query
 
   #colOfKey = (k: string | undefined): number =>
-    this.#engine?.model.colOfKey?.(k) ?? (Array.isArray(this.#opts.columns) ? this.#opts.columns.findIndex((d) => d.key === k) : -1);
+    this.#engine?.model.colOfKey?.(k) ?? this.#columnList()?.findIndex((d) => d.key === k) ?? -1;
 
+  /** The sort, row filter and column filter in effect. */
   getQuery(): Query {
-    return this.#engine ? this.#engine.getQuery() : { sort: this.#opts.sort ?? [], filter: this.#opts.filter ?? [], columnFilter: this.#opts.columnFilter ?? [] };
+    if (this.#engine) return this.#engine.getQuery();
+    const q = { ...this.#opts.defaultQuery, ...this.#opts.query };
+    return { sort: q.sort ?? [], filter: q.filter ?? [], columnFilter: q.columnFilter ?? [] };
   }
 
-  getSort(): SortItem[] { return this.getQuery().sort; }
-
-  getFilter(): FilterItem[] { return this.getQuery().filter; }
-
-  getColumnFilter(): ColumnFilterItem[] { return this.getQuery().columnFilter; }
-
-  /** Sort: [{ column | key, direction }] or [{ level, direction }] (pivot row dimensions). Resolves true when applied. */
-  setSort(sort: SortItem[]): Promise<boolean> {
-    if (!this.#engine) return this.ready.then(() => this.setSort(sort));
-    return this.#engine.setSort(sortFromPublic(sort, this.#colOfKey));
-  }
-
-  /** Row filter: [{ column | key | level, op, … }] (see the query format). Resolves true when applied. */
-  setFilter(filter: FilterItem[]): Promise<boolean> {
-    if (!this.#engine) return this.ready.then(() => this.setFilter(filter));
-    return this.#engine.setFilter(filterFromPublic(filter, this.#colOfKey));
-  }
-
-  /** Column filter: [{ level, op, … }] on column groups (tables) or column dimensions (pivots). */
-  setColumnFilter(columnFilter: ColumnFilterItem[]): Promise<boolean> {
-    if (!this.#engine) return this.ready.then(() => this.setColumnFilter(columnFilter));
-    return this.#engine.setColumnDimFilter(columnFilterFromPublic(columnFilter));
+  /**
+   * Change the query: the parts given (sort, filter, columnFilter) replace the current ones, the others stay.
+   * Resolves true when all of them were applied (false if one was refused, failed or cancelled).
+   */
+  setQuery(query: Partial<Query>): Promise<boolean> {
+    const e = this.#engine;
+    if (!e) return this.ready.then(() => this.setQuery(query));
+    const runs: Promise<boolean>[] = [];
+    if (query.columnFilter !== undefined) runs.push(e.setColumnDimFilter(columnFilterFromPublic(query.columnFilter)));
+    if (query.filter !== undefined) runs.push(e.setFilter(filterFromPublic(query.filter, this.#colOfKey)));
+    if (query.sort !== undefined) runs.push(e.setSort(sortFromPublic(query.sort, this.#colOfKey)));
+    return Promise.all(runs).then((oks) => oks.every(Boolean));
   }
 
   /** Same as a click on a column's sort control (column: source index or key). */
@@ -369,9 +397,24 @@ export class Grid {
   refresh(): Promise<void> {
     const e = this.#engine;
     if (!e) return this.ready;
+    // Columns taken from the rows: new rows with other fields need new columns.
+    const next = this.#inferColumns(this.#source);
+    if (JSON.stringify(next) !== JSON.stringify(this.#inferred)) return this.rebuild();
     const snap = e.rowSnapshot();
     this.#source.clearCache?.();
     return e.refresh(snap);
+  }
+
+  /** The column list in use: the one given, or the one taken from the rows. */
+  #columnList(): ColumnDef<any>[] | undefined {
+    return Array.isArray(this.#opts.columns) ? this.#opts.columns : this.#inferred ?? undefined;
+  }
+
+  /** Columns the data source took from its rows, when the grid was given none (no columns, getColumn or columnCount). */
+  #inferColumns(source: Partial<DataSource>): ColumnDef<any>[] | null {
+    const o = this.#opts;
+    if (Array.isArray(o.columns) || typeof o.getColumn === 'function' || o.columnCount !== undefined) return null;
+    return (source as { inferredColumns?(): ColumnDef<any>[] | null }).inferredColumns?.() ?? null;
   }
 
   /** The record behind a visible row, when the data source has it (in-memory rows, getRows pages loaded). */
@@ -394,7 +437,7 @@ export class Grid {
     const e = this.#engine;
     const order = e?.model.columnOrder?.();
     if (!order) return [];
-    return Array.isArray(this.#opts.columns) ? expandOrder(order).map((s) => e!.model.keyOf?.(s) ?? s) : order;
+    return this.#columnList() ? expandOrder(order).map((s) => e!.model.keyOf?.(s) ?? s) : order;
   }
 
   setColumnOrder(order: (string | number | [number, number])[]): void {

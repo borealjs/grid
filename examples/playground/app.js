@@ -2,7 +2,10 @@
 // server latency and watch performance. The grid only ever sees a data source; a Web Worker plays the
 // server (server-worker.js) and this page adds network latency, jitter and failures around each call.
 
-import { createGrid, createRowSource, createArraySource, createHttpSource, EMPTY_QUERY } from '../../packages/grid-core/dist/index.js';
+import { createGrid, createHttpSource, EMPTY_QUERY } from '../../packages/grid-core/dist/index.js';
+import { createClickHouse, createNycOpenData, CLICKHOUSE_TABLES, NYC_DATASETS } from './live-sources.js';
+import { createClickHousePivot, liveFields } from './live-pivot.js';
+import { LANGUAGES, customHeader, customEmpty, atLeastFilter, moveColumn, toReact } from './features.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -20,10 +23,17 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', 
 const DEFAULTS = {
   source: { rows: 200000, dims: 12, measures: 6, years: 5, seed: 42 },
   virtual: { rows: 1_000_000_000, cols: 1_000_000, years: 10 },
+  live: { provider: 'clickhouse', table: 'uk_price_paid' },
   theme: 'auto',
   mode: 'pivot',
   pivot: null, // filled from the dataset (field indexes; SIGMA marks the Σ Values level)
   table: { hidden: [], pinned: 1 },
+  // Columns: per-column pins / options (by key) for column lists, pinned counts for any table, saved order.
+  cols: { pins: {}, left: null, right: null, opts: {}, order: null, keepOrder: true, minWidth: 48 },
+  // Customisation the grid offers beyond the basics.
+  adv: { customHeader: false, customEmpty: false, customFilter: false, rowClass: 'none', rules: 'all', lang: 'en', accent: '', fontSize: 13 },
+  // State and API: controlled query, checked rows, block sizes.
+  api: { controlled: false, query: null, keepChecks: true, checks: null, blockRows: 100, blockCols: 20 },
   server: { latency: 40, jitter: 10, failRate: 0, pageSize: 100, maxCells: 20000 },
   grid: {
     rowHeight: 28, headerHeight: 34, columnWidth: 120, selection: 'multi',
@@ -45,7 +55,7 @@ function loadState() {
   }
   const s = structuredClone(DEFAULTS);
   if (saved && typeof saved === 'object') {
-    for (const k of ['source', 'virtual', 'server', 'grid', 'format', 'table']) Object.assign(s[k], saved[k] ?? {});
+    for (const k of ['source', 'virtual', 'live', 'server', 'grid', 'format', 'table', 'cols', 'adv', 'api']) Object.assign(s[k], saved[k] ?? {});
     for (const k of ['theme', 'mode', 'pivot', 'perfOpen']) if (saved[k] !== undefined) s[k] = saved[k];
   }
   return s;
@@ -61,6 +71,7 @@ function saveState() {
 
 let dataset = null; // { rows, fields: [{ index, key, name, kind, cardinality }], bytes, source, buildMs }
 let grid = null;
+let merges = []; // merged cells set from the menu (grid.setMerges), source coordinates
 let gridSerial = 0;
 let lastPivotInfo = null;
 let lastTable = null;
@@ -70,19 +81,34 @@ const samples = {}; // last request / response per call kind, for the "server co
 
 // ================================================================== worker "server" + simulated network
 
-const worker = new Worker(new URL('./server-worker.js', import.meta.url), { type: 'module' });
+let worker;
 let rpcSeq = 0;
 const pending = new Map();
-worker.onmessage = (e) => {
-  const msg = e.data;
-  const p = pending.get(msg.id);
-  if (!p) return;
-  if (msg.progress) { p.onProgress?.(msg.progress); return; }
-  pending.delete(msg.id);
-  if (msg.ok) p.resolve(msg);
-  else p.reject(Object.assign(new Error(msg.error), { serverMs: msg.serverMs }));
-};
-worker.onerror = (e) => toast(`Worker error: ${e.message}`);
+function startWorker() {
+  worker = new Worker(new URL('./server-worker.js', import.meta.url), { type: 'module' });
+  worker.onmessage = (e) => {
+    const msg = e.data;
+    const p = pending.get(msg.id);
+    if (!p) return;
+    if (msg.progress) { p.onProgress?.(msg.progress); return; }
+    pending.delete(msg.id);
+    if (msg.ok) p.resolve(msg);
+    else p.reject(Object.assign(new Error(msg.error), { serverMs: msg.serverMs }));
+  };
+  // No limits are enforced up front, so the "server" can die (e.g. out of memory): fail what was waiting
+  // with its error instead of leaving it hanging, and start a fresh one.
+  worker.onerror = (e) => {
+    e.preventDefault?.();
+    const reason = e.message || 'the worker stopped (likely out of memory)';
+    for (const p of pending.values()) p.reject(new Error(reason));
+    pending.clear();
+    worker.terminate();
+    if (dataset && !dataset.live && !dataset.virtual) { dataset = null; grid?.destroy(); grid = null; $('#emptyState').hidden = false; }
+    toast(`The data server stopped: ${reason}. Load data again to continue.`);
+    startWorker();
+  };
+}
+startWorker();
 
 function workerCall(op, args, { signal, onProgress } = {}) {
   return new Promise((resolve, reject) => {
@@ -117,7 +143,7 @@ function newMetrics() {
 let logSeq = 0;
 
 /** One data-source call: latency there, the worker's compute, latency back. Recorded for the panel. */
-async function net(op, args, { signal, onProgress, kind, detail = '', cells = 0 } = {}) {
+async function net(op, args, { signal, onProgress, kind, detail = '', cells = 0, run } = {}) {
   const { latency, jitter, failRate } = state.server;
   const lat = Math.max(0, latency + (jitter ? (Math.random() * 2 - 1) * jitter : 0));
   const entry = { id: ++logSeq, kind, detail, t0: performance.now(), status: 'pending', latency: lat, serverMs: 0, total: 0, bytes: 0, serial: gridSerial };
@@ -134,7 +160,9 @@ async function net(op, args, { signal, onProgress, kind, detail = '', cells = 0 
       await sleep(lat / 2, signal);
       throw new Error(`Simulated server error (503) on ${kind}`);
     }
-    const res = await workerCall(op, args, { signal, onProgress });
+    // `run` is a real remote call (live databases); everything else goes to the worker "server".
+    const res = run ? await run(signal) : await workerCall(op, args, { signal, onProgress });
+    if (res.query) entry.query = res.query;
     entry.serverMs = res.serverMs;
     entry.bytes = res.bytes;
     await sleep(lat / 2, signal);
@@ -142,9 +170,11 @@ async function net(op, args, { signal, onProgress, kind, detail = '', cells = 0 
     metrics.ok++;
     metrics.bytes += res.bytes;
     metrics.cells += cells;
-    metrics.srv.push(res.serverMs);
-    if (metrics.srv.length > 1000) metrics.srv.shift();
-    samples[kind] = { args, result: res.result };
+    if (Number.isFinite(res.serverMs)) {
+      metrics.srv.push(res.serverMs);
+      if (metrics.srv.length > 1000) metrics.srv.shift();
+    }
+    samples[kind] = { args: run ? { query: res.query } : args, result: res.result };
     return res.result;
   } catch (err) {
     if (err?.name === 'AbortError') { entry.status = 'aborted'; metrics.aborted++; }
@@ -186,13 +216,16 @@ function hideProgress() { $('#progress').hidden = true; }
 
 async function generateData() {
   const s = state.source;
-  s.rows = clamp(Math.round(s.rows) || 1000, 1, 10_000_000);
-  if (s.rows * (s.dims + s.measures + 1) > 120_000_000) {
-    toast('That is a lot of cells for a browser tab: try fewer rows or columns (rows × columns ≤ 120M).');
+  s.rows = Math.max(1, Math.round(s.rows) || 1000);
+  const t0 = performance.now();
+  // No size cap: if the tab runs out of memory, the worker's own error is shown.
+  let info;
+  try {
+    info = await build('generate', { rows: s.rows, dims: s.dims, measures: s.measures, years: s.years, seed: s.seed });
+  } catch (err) {
+    toast(`Could not generate ${fmtInt(s.rows)} rows: ${err.message}`);
     return;
   }
-  const t0 = performance.now();
-  const info = await build('generate', { rows: s.rows, dims: s.dims, measures: s.measures, years: s.years, seed: s.seed });
   onDataset(info, performance.now() - t0, { keepLayout: true });
 }
 
@@ -211,7 +244,6 @@ const loadCsvText = (text, name) => loadCsv({ text }, name);
 
 async function loadCsvFile(file) {
   if (!file) return;
-  if (file.size > 3 * 1024 ** 3) { toast('Files up to about 3 GB can be streamed into a browser tab.'); return; }
   await loadCsv({ file }, file.name);
 }
 
@@ -252,6 +284,7 @@ function onDataset(info, wallMs, { keepLayout }) {
   if (!keepLayout || !state.pivot || (prevSig && prevSig !== sig) || !validPivot(state.pivot)) state.pivot = defaultPivot();
   state.table.hidden = state.table.hidden.filter((k) => info.fields.some((f) => f.key === k));
   state.source.type = info.source.type;
+  state.pivotSource = 'local';
   renderDatasetBadge();
   applySourceUi();
   renderFieldList();
@@ -265,9 +298,10 @@ function onDataset(info, wallMs, { keepLayout }) {
 
 async function loadVirtual() {
   const v = state.virtual;
-  v.rows = clamp(Math.round(v.rows) || 1, 1, 1e14);
-  v.cols = clamp(Math.round(v.cols) || 1, 1, 1e12);
-  v.years = clamp(Math.round(v.years) || 1, 1, 20000);
+  // Sent as asked: the backend applies (and reports) its own limits.
+  v.rows = Math.max(1, Math.round(v.rows) || 1);
+  v.cols = Math.max(1, Math.round(v.cols) || 1);
+  v.years = Math.max(1, Math.round(v.years) || 1);
   try {
     const res = await build('loadVirtual', {});
     dataset = { virtual: true, rows: v.rows, cols: v.cols, years: v.years, fields: [], bytes: 0, source: { type: 'virtual' }, buildMs: res.ms };
@@ -283,14 +317,152 @@ async function loadVirtual() {
   rebuildGrid();
 }
 
-/** Virtual data has no fields to arrange: its layout is fixed, so the field UI gives way to a note. */
+const LIVE_PROVIDERS = {
+  clickhouse: { create: createClickHouse, tables: CLICKHOUSE_TABLES, host: 'play.clickhouse.com' },
+  nyc: { create: createNycOpenData, tables: NYC_DATASETS, host: 'data.cityofnewyork.us' },
+};
+
+/** A real public database: every page, count and value list is a query over the internet. */
+async function loadLive() {
+  const { provider, table } = state.live;
+  const p = LIVE_PROVIDERS[provider];
+  const entry = p?.tables.find((t) => t.table === table) ?? p?.tables[0];
+  if (!entry) return;
+  const btn = $('#liveForm button[type=submit]');
+  btn.disabled = true;
+  showProgress(`Connecting to ${p.host}…`, null);
+  const t0 = performance.now();
+  try {
+    const track = (kind, detail, run, signal, cells) => net(null, null, { kind, detail, run, signal, cells });
+    const db = p.create({ table: entry.table, track });
+    const schema = await db.load();
+    // ClickHouse can pivot (GROUP BY, block by block): its columns become pivot fields.
+    const fields = provider === 'clickhouse' ? liveFields(schema.columns) : [];
+    dataset = { live: db, provider, table: entry.table, entry, track, label: entry.label, rows: schema.total, fields, schema, bytes: 0, source: { type: 'live' }, buildMs: performance.now() - t0 };
+  } catch (err) {
+    toast(`Could not connect: ${err.message}`);
+    return;
+  } finally {
+    btn.disabled = false;
+    hideProgress();
+  }
+  state.source.type = 'live';
+  const sourceKey = `live:${provider}:${entry.table}`;
+  if (provider === 'clickhouse') {
+    if (state.pivotSource !== sourceKey || !state.pivot || !validPivot(state.pivot)) state.pivot = defaultLivePivot(entry);
+    state.pivotSource = sourceKey;
+    normalizePivot();
+    renderFieldList();
+    renderZones();
+  } else {
+    state.mode = 'table'; // NYC Open Data has no grouping sets: its rows are shown as they are
+  }
+  $$('#modeSeg button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.v === state.mode)));
+  renderDatasetBadge();
+  applySourceUi();
+  $('#emptyState').hidden = true;
+  saveState();
+  rebuildGrid();
+}
+
+/** A starting pivot for a live table: the table's suggestion, or its first category columns and numbers. */
+function defaultLivePivot(entry) {
+  const byName = (n) => dataset.fields.find((f) => f.name === n)?.index;
+  const sug = entry.pivot;
+  if (sug) {
+    const rows = sug.rows.map(byName).filter((i) => i !== undefined);
+    const values = sug.values.map(([n, agg]) => ({ field: byName(n), agg })).filter((v) => v.field !== undefined);
+    const cols = [...(values.length ? [SIGMA] : []), ...sug.cols.map(byName).filter((i) => i !== undefined)];
+    return { rows, cols, values, subtotals: true, grandTotals: true };
+  }
+  const cats = dataset.schema.columns.filter((c) => c.kind === 'values').map((c) => byName(c.name)).filter((i) => i !== undefined);
+  const year = dataset.fields.find((f) => f.name.endsWith(' · year'))?.index;
+  const num = dataset.fields.find((f) => f.kind === 'num')?.index;
+  const values = num !== undefined ? [{ field: num, agg: 'sum' }] : [];
+  return { rows: cats.slice(0, 2), cols: [...(values.length ? [SIGMA] : []), ...(year !== undefined ? [year] : [])], values, subtotals: true, grandTotals: true };
+}
+
+function liveColumns() {
+  const f = numberFormatter();
+  const groups = { number: 'Numbers', date: 'Dates', values: 'Categories', text: 'Text', complex: 'Other' };
+  return dataset.schema.columns.map((c, i) => {
+    const idLike = /(^|_)(id|code|zip|year|key|num|number)$/i.test(c.name);
+    const col = {
+      key: c.key,
+      title: c.title ?? c.name,
+      group: groups[c.kind],
+      width: c.kind === 'number' ? Math.max(90, state.grid.columnWidth - 10) : Math.max(state.grid.columnWidth, Math.min(240, (c.title ?? c.name).length * 8 + 40)),
+    };
+    if (c.kind === 'number') {
+      col.type = 'number';
+      col.format = (v) => (v == null ? '' : typeof v !== 'number' || idLike ? String(v) : f.format(v));
+      if (state.format.conditional !== 'none') col.cellClass = (v) => (typeof v === 'number' && v < 0 ? 'neg' : '');
+    } else if (c.kind === 'date') {
+      col.type = 'date';
+    } else if (c.kind === 'values') {
+      col.filter = c.values ? { type: 'values', values: c.values } : 'values';
+    } else if (c.kind === 'text') {
+      // A value list scans the whole column; on a huge table the database may time out, and says so.
+      col.filter = c.lists ? 'values' : 'text';
+    } else {
+      col.filter = false;
+      col.sortable = false;
+    }
+    return col;
+  }).map(columnPrefs);
+}
+
+/**
+ * What the user set for a column (any column, by key): pinned left or right, alignment, sorting / resizing /
+ * dragging turned off, hidden, highlighted; plus the custom "at least" filter on number columns.
+ */
+function columnPrefs(col) {
+  const out = { ...col };
+  const pin = state.cols.pins[col.key];
+  if (pin) out.pinned = pin; else delete out.pinned;
+  const o = state.cols.opts[col.key] ?? {};
+  if (o.align) out.align = o.align;
+  if (o.sortable === false) out.sortable = false;
+  if (o.resizable === false) out.resizable = false;
+  if (o.reorderable === false) out.reorderable = false;
+  if (o.hidden) out.hidden = true;
+  if (o.highlight) { out.className = 'col-hl'; out.headerClass = 'col-hl-head'; }
+  if (state.adv.customFilter && out.type === 'number' && out.filter !== false) out.filter = atLeastFilter();
+  return out;
+}
+
+function liveSource(serial) {
+  const db = dataset.live;
+  // A `{ getRows }` data source: the grid pages, caches and reads cells by column key itself.
+  return {
+    pageSize: state.server.pageSize,
+    async getRows(req) {
+      const res = await db.getRows(req);
+      if (serial === gridSerial) {
+        lastTable = res;
+        if (firstDataMs == null) firstDataMs = performance.now() - gridCreatedAt;
+        renderSummary();
+      }
+      return res;
+    },
+    getFilterValues: (req) => db.getFilterValues(req),
+  };
+}
+
+/** Virtual and live data have no fields to arrange, so the field UI gives way to a note. */
 function applySourceUi() {
   const virtual = !!dataset?.virtual;
-  $('#pivotFieldsUi').hidden = virtual;
-  $('#tableFieldsUi').hidden = virtual;
+  const live = !!dataset?.live;
+  $('#pivotFieldsUi').hidden = virtual || (live && dataset.provider !== 'clickhouse');
+  $('#tableFieldsUi').hidden = virtual || live;
   const note = $('#virtualNote');
-  note.hidden = !virtual;
-  if (virtual) {
+  note.hidden = !virtual && !live;
+  if (live && state.mode === 'pivot') {
+    note.innerHTML = `Live pivot on <b>${escapeHtml(dataset.label)}</b> (${fmtInt(dataset.rows)} rows) in ClickHouse, block by block: the layout is one GROUP BY per level, header names and cells load as you scroll (watch the request log). Nothing is capped: if a layout is too much for the database, its error shows.`;
+  } else if (live) {
+    const p = LIVE_PROVIDERS[dataset.provider];
+    note.innerHTML = `Live: <b>${escapeHtml(dataset.label)}</b> (${fmtInt(dataset.rows)} rows, ${dataset.schema.columns.length} columns) from <b>${p.host}</b>. Every page, count and value list is a real query, sent from your browser. Hide column types from the # corner menu. Jumping deep into a big table is slow there: databases still walk every row before an OFFSET.`;
+  } else if (virtual) {
     note.innerHTML = state.mode === 'pivot'
       ? `Virtual pivot: rows <b>Region › Country › City › Product</b> (${fmtInt(dataset.rows)} products), columns <b>Measure › Year › Quarter › Month</b> (68 per year, plus totals). Sort, filter, expand and collapse all work; to arrange your own fields, load real data with Generate or Upload CSV.`
       : `Virtual table: <b>${fmtInt(dataset.rows)}</b> rows × <b>${fmtInt(dataset.cols)}</b> columns. Show or hide column types from the # corner menu. Sort and filter run on the server; multi-column sorts and filters past its limits are refused with a message.`;
@@ -299,6 +471,10 @@ function applySourceUi() {
 
 function renderDatasetBadge() {
   const d = dataset;
+  if (d.live) {
+    $('#datasetBadge').innerHTML = `Live ${escapeHtml(d.live.provider)} · <b>${escapeHtml(d.label)}</b> · <b>${fmtInt(d.rows)}</b> rows × <b>${d.schema.columns.length}</b> columns · queried from ${LIVE_PROVIDERS[d.provider].host}`;
+    return;
+  }
   if (d.virtual) {
     $('#datasetBadge').innerHTML = state.mode === 'pivot'
       ? `Virtual · <b>${fmtInt(d.rows)}</b> products × <b>${fmtInt(d.years)}</b> years of columns · computed per cell, 0 B stored`
@@ -597,7 +773,6 @@ function renderColumnList() {
 }
 $('#colsAll').addEventListener('click', () => { state.table.hidden = []; renderColumnList(); saveState(); rebuildGrid(); });
 $('#colsNone').addEventListener('click', () => { state.table.hidden = dataset.fields.slice(1).map((f) => f.key); renderColumnList(); saveState(); rebuildGrid(); });
-$('#pinnedCount').addEventListener('change', (e) => { state.table.pinned = clamp(Number(e.target.value) || 0, 0, 10); saveState(); rebuildGrid(); });
 
 // ================================================================== formatting
 
@@ -651,17 +826,83 @@ function pivotHooks() {
 
 // ================================================================== grid
 
+/** Which columns / pivot levels may be sorted and filtered: the function form of `sortable` / `filterable`. */
+function ruleFns() {
+  const r = state.adv.rules;
+  const g = state.grid;
+  if (r === 'all') return { sortable: g.sortable, filterable: g.filterable };
+  const numberKeys = new Set();
+  if (dataset?.live) dataset.schema.columns.forEach((c) => { if (c.kind === 'number') numberKeys.add(c.key); });
+  else dataset?.fields?.forEach((f) => { if (f.kind === 'num') numberKeys.add(f.key); });
+  // The target names a column by source index (and key, when the grid knows it): map the index to our key.
+  const listKeys = state.mode === 'table' && !dataset?.virtual ? (dataset?.live ? liveColumns() : tableColumns()).map((c) => c.key) : [];
+  const keyOf = (t) => t.key ?? (t.column !== undefined ? listKeys[t.column] : undefined);
+  const isNumberCol = (t) => t.axis === 'cols' && keyOf(t) !== undefined && numberKeys.has(keyOf(t));
+  const isTextCol = (t) => t.axis === 'cols' && keyOf(t) !== undefined && !numberKeys.has(keyOf(t));
+  const rule = {
+    numbers: (t) => t.axis !== 'cols' || keyOf(t) === undefined || isNumberCol(t),
+    noText: (t) => !isTextCol(t),
+    topLevel: (t) => t.axis !== 'rows' || t.level === 0,
+  }[r];
+  return {
+    sortable: g.sortable && (r === 'noText' ? true : rule),
+    filterable: g.filterable && rule,
+  };
+}
+
+/** A key for "the same view": a saved query only makes sense for the same data, mode and pivot layout. */
+function viewKey() {
+  const src = dataset?.live ? `live:${dataset.table}` : dataset?.virtual ? 'virtual' : state.source.type;
+  return `${src}|${state.mode}|${state.mode === 'pivot' ? JSON.stringify([state.pivot?.rows, state.pivot?.cols, state.pivot?.values]) : ''}`;
+}
+
+/** rowClass gets a row index: rows whose loaded record has a negative number get a class. */
+function negativeRowClass(r) {
+  const row = grid?.getRow(r);
+  if (!row) return '';
+  return Object.values(row).some((v) => typeof v === 'number' && v < 0) ? 'row-neg' : '';
+}
+
+let applyingQuery = false;
+function onQueryChange(part, value) {
+  if (applyingQuery) return;
+  if (state.api.controlled) {
+    // Controlled: the grid only reports what the user asked for; the owner applies it.
+    applyingQuery = true;
+    try {
+      grid.setQuery({ [part]: value });
+    } finally { applyingQuery = false; }
+  }
+  state.api.query = { ...(state.api.query?.key === viewKey() ? state.api.query : {}), key: viewKey(), [part]: value };
+  saveState();
+  setTimeout(renderStatePanel, 0);
+}
+
 function commonOptions() {
   const g = state.grid;
+  const a = state.adv;
+  const rules = ruleFns();
+  const q = state.api.query?.key === viewKey() ? state.api.query : null;
   return {
     theme: state.theme,
     rowHeight: g.rowHeight,
     headerHeight: g.headerHeight,
     columnWidth: g.columnWidth,
+    minColumnWidth: state.cols.minWidth,
+    advanced: { blockRows: state.api.blockRows, blockCols: state.api.blockCols },
     selection: g.selection,
-    sortable: g.sortable,
+    sortable: rules.sortable,
     multiSort: g.multiSort,
-    filterable: g.filterable,
+    filterable: rules.filterable,
+    messages: LANGUAGES[a.lang]?.messages ?? undefined,
+    renderHeader: a.customHeader ? customHeader : undefined,
+    renderEmpty: a.customEmpty ? customEmpty(() => grid) : undefined,
+    rowClass: a.rowClass === 'every5' ? (r) => (r % 5 === 4 ? 'row-hl' : '') : a.rowClass === 'negative' ? negativeRowClass : undefined,
+    // Starting query: what the user had in this view (kept when controlled, or when reloading). Controlled:
+    // the page owns the whole query, so every part is passed as `query`.
+    ...(state.api.controlled
+      ? { query: { sort: q?.sort ?? [], filter: q?.filter ?? [], columnFilter: q?.columnFilter ?? [] } }
+      : { defaultQuery: { sort: q?.sort, filter: q?.filter, columnFilter: q?.columnFilter } }),
     resizable: g.resizable,
     reorderable: g.reorderable,
     expandable: g.expandable,
@@ -671,14 +912,27 @@ function commonOptions() {
     onSelectionChange: onSelection,
     onCopy: (info) => setEvent(info.ok ? `Copied ${fmtInt(info.cells)} cells in ${fmtMs(info.ms)}` : `Copy failed: ${info.reason ?? ''}`),
     onCellClick: (e) => setEvent(`Click · ${cellName(e)}`),
-    onCellDoubleClick: (e) => { setEvent(`Double-click · ${cellName(e)}`); if (state.mode === 'pivot' && !dataset?.virtual) openDrill(e); },
+    onCellDoubleClick: (e) => { setEvent(`Double-click · ${cellName(e)}`); if (state.mode === 'pivot' && !dataset?.virtual && !dataset?.live) openDrill(e); },
     onCellContextMenu: (e) => { e.event.preventDefault(); openMenu(e); },
-    onSortChange: (s) => setEvent(`Sort · ${s.length ? s.map((x) => `${x.key ?? (x.level !== undefined ? `level ${x.level}` : `col ${x.column}`)} ${x.direction}`).join(', ') : 'cleared'}`),
-    onFilterChange: (f) => setEvent(`Filter · ${f.length} condition${f.length === 1 ? '' : 's'}`),
-    onColumnFilterChange: (f) => setEvent(`Column filter · ${f.length} condition${f.length === 1 ? '' : 's'}`),
+    onQueryChange: (query, part) => {
+      const v = query[part];
+      if (part === 'sort') setEvent(`Sort · ${v.length ? v.map((x) => `${x.key ?? (x.level !== undefined ? `level ${x.level}` : `col ${x.column}`)} ${x.direction}`).join(', ') : 'cleared'}`);
+      else setEvent(`${part === 'filter' ? 'Filter' : 'Column filter'} · ${v.length} condition${v.length === 1 ? '' : 's'}`);
+      onQueryChange(part, v);
+    },
     onColumnResize: (r) => setEvent(`Resized ${r.key ?? `column ${r.column}`} to ${Math.round(r.width)} px`),
-    onColumnOrderChange: (o) => setEvent(`Column order · ${o.slice(0, 4).join(', ')}${o.length > 4 ? '…' : ''}`),
-    onRowSelectionChange: (s) => setEvent(s.all ? `All rows checked${s.except.length ? ` except ${s.except.length}` : ''}` : `${s.ids.length} row${s.ids.length === 1 ? '' : 's'} checked`),
+    onColumnOrderChange: (o) => {
+      setEvent(`Column order · ${o.slice(0, 4).map((x) => (Array.isArray(x) ? `${x[0]}–${x[1]}` : x)).join(', ')}${o.length > 4 ? '…' : ''}`);
+      if (state.cols.keepOrder) { state.cols.order = { key: viewKey(), order: o }; saveState(); }
+      renderStatePanel();
+    },
+    onRowSelectionChange: (s) => {
+      // RowSelection is a list of steps ({ id, checked } or { from, to, query, checked }); checkedCount() totals them.
+      const n = grid?.checkedCount?.();
+      setEvent(`${n == null ? `${s.checks?.length ?? 0} check steps` : `${fmtInt(n)} row${n === 1 ? '' : 's'} checked`}`);
+      if (state.api.keepChecks) { state.api.checks = { key: viewKey(), sel: s }; saveState(); }
+      renderStatePanel();
+    },
     onViewChange: (v) => {
       if (v.pending) setEvent(`${v.what === 'sort' ? 'Sorting' : 'Filtering'}…${v.progress?.total ? ` ${Math.round((v.progress.done / v.progress.total) * 100)}%` : ''}`);
       else if (v.cancelled) setEvent(`${v.what} cancelled`);
@@ -739,7 +993,7 @@ function tableColumns() {
   const cond = state.format.conditional;
   return visibleFields().map((fd, i) => {
     const idLike = /(^|\s)(id|code|zip)$|^year$/i.test(fd.name);
-    const col = { key: fd.key, title: fd.name, pinned: i < state.table.pinned, width: fd.kind === 'num' ? Math.max(90, state.grid.columnWidth - 10) : Math.max(state.grid.columnWidth, Math.min(220, fd.name.length * 8 + 40)) };
+    const col = { key: fd.key, title: fd.name, width: fd.kind === 'num' ? Math.max(90, state.grid.columnWidth - 10) : Math.max(state.grid.columnWidth, Math.min(220, fd.name.length * 8 + 40)) };
     if (fd.kind === 'num') {
       col.type = 'number';
       col.format = (v) => (v == null ? '' : idLike ? String(v) : f.format(v));
@@ -748,12 +1002,12 @@ function tableColumns() {
       col.filter = fd.cardinality <= 5000 ? 'values' : 'text';
     }
     return col;
-  });
+  }).map(columnPrefs);
 }
 
 function tableSource(serial) {
   const keys = visibleFields().map((f) => f.key);
-  return createRowSource({
+  return {
     pageSize: state.server.pageSize,
     async getRows({ offset, limit, sort, filter, signal }) {
       const q = plain({ sort, filter });
@@ -768,10 +1022,10 @@ function tableSource(serial) {
     getFilterValues({ key, search, limit, signal }) {
       return net('tableValues', { key, search, limit }, { signal, kind: 'values', detail: `${key}${search ? ` "${search}"` : ''}` });
     },
-    indexOfRow(id, query, signal) {
-      return net('indexOfRow', { rowId: id, query: plain({ sort: query.sort, filter: query.filter }) }, { signal, kind: 'index', detail: `row id ${id}` });
+    indexOfRow(id, query) {
+      return net('indexOfRow', { rowId: id, query: plain({ sort: query.sort, filter: query.filter }) }, { kind: 'index', detail: `row id ${id}` });
     },
-  });
+  };
 }
 
 function virtualSource(serial) {
@@ -835,31 +1089,48 @@ async function createGridNow() {
   $('#tableConfig').hidden = state.mode !== 'table';
   $('#levelBar').replaceChildren();
 
+  // Column pins and options are by key: they belong to one dataset.
+  const sourceId = viewKey().split('|')[0] + (dataset.live ? '' : `:${dataset.fields?.map((f) => f.name).join(',') ?? ''}`);
+  if (state.cols.for !== sourceId) {
+    Object.assign(state.cols, { pins: {}, left: null, right: null, opts: {}, order: null, for: sourceId });
+    saveState();
+  }
   applySourceUi();
+  paintColumnsUi();
   if (dataset.virtual) renderDatasetBadge();
   let options;
-  if (dataset.virtual) {
+  if (dataset.live && state.mode === 'pivot') {
+    const cfg = { ...pivotCfg(), maxCells: state.server.maxCells };
+    const bands = Math.max(2, cfg.rows.length);
+    options = {
+      ...commonOptions(),
+      ...pivotHooks(),
+      data: createClickHousePivot({ table: dataset.table, fields: dataset.fields, cfg, track: dataset.track }),
+      rowHeaderWidths: Array.from({ length: bands }, (_, i) => (innerWidth < 760 ? (i === bands - 1 ? 116 : 96) : i === bands - 1 ? 170 : 140)),
+      ariaLabel: `${dataset.label} pivot (live)`,
+    };
+  } else if (dataset.live) {
+    options = {
+      ...commonOptions(),
+      ...tableExtras(),
+      data: liveSource(serial),
+      columns: liveColumns(),
+      columnChooser: true,
+      ariaLabel: `${dataset.label} (live)`,
+    };
+  } else if (dataset.virtual) {
     const source = virtualSource(serial);
     if (state.mode === 'pivot') {
-      options = { ...commonOptions(), dataSource: source, ariaLabel: 'Virtual pivot table' };
+      options = { ...commonOptions(), data: source, ariaLabel: 'Virtual pivot table' };
     } else {
-      // Read the layout first: it carries the column types the column definitions need.
-      let layout;
-      try { layout = await source.getLayout({ query: EMPTY_QUERY }); } catch (err) { setEvent(`⚠ ${err.message}`); return; }
-      if (serial !== gridSerial) return;
-      const meta = layout.meta ?? layout;
-      const kinds = meta.columnKinds ?? [];
-      const types = meta.columnTypes ?? [];
-      const filterOf = (k) => (!k ? false : k.kind === 'values' ? { type: 'values', values: k.values } : k.kind);
+      // A million columns, described by the server as they scroll into view (getColumns): titles, types,
+      // filters, widths and groups arrive for the columns on screen only. The column chooser asks the
+      // server for the groups too.
       options = {
         ...commonOptions(),
-        dataSource: source,
-        layout,
-        columnCount: meta.cols,
-        getColumn: (i) => ({ group: types[i % types.length], filter: filterOf(kinds[i % kinds.length]) }),
-        columnChooser: types.length > 0,
-        columnGroups: types,
-        rowHeader: state.grid.rowNumbers ? undefined : false,
+        ...tableExtras(),
+        data: source,
+        columnChooser: true,
         ariaLabel: 'Virtual table',
       };
     }
@@ -869,7 +1140,7 @@ async function createGridNow() {
     options = {
       ...commonOptions(),
       ...pivotHooks(),
-      dataSource: pivotSource(cfg, serial),
+      data: pivotSource(cfg, serial),
       rowHeaderWidths: Array.from({ length: bands }, (_, i) => (innerWidth < 760 ? (i === bands - 1 ? 116 : 96) : i === bands - 1 ? 170 : 140)),
       ariaLabel: 'Pivot table',
     };
@@ -878,33 +1149,73 @@ async function createGridNow() {
     if (!cols.length) { $('#summary').innerHTML = 'Pick at least one column.'; return; }
     options = {
       ...commonOptions(),
-      dataSource: tableSource(serial),
+      ...tableExtras(),
+      data: tableSource(serial),
       columns: cols,
       getRowId: (row) => row.__id,
-      rowSelection: state.grid.rowSelection,
-      rowHeader: state.grid.rowNumbers || state.grid.rowSelection ? undefined : false,
       ariaLabel: 'Data table',
     };
   }
+  applyThemeVars();
   // The first layout of a big dataset (a pivot over millions of rows) can take seconds: say so, with its progress.
-  if (!dataset.virtual && !builds) showProgress('Building the view…', null);
+  if (!dataset.virtual && !dataset.live && !builds) showProgress('Building the view…', null);
   grid = createGrid(host, options);
+  merges = [];
   grid.ready.then(() => {
     if (serial !== gridSerial) return;
     renderLevelBar();
     renderSummary();
+    renderStatePanel();
   }).catch((err) => setEvent(`⚠ ${err.message ?? err}`)).finally(() => { if (serial === gridSerial && !builds) hideProgress(); });
+}
+
+/**
+ * Options of every table view (not pivots): pinned counts, the saved column order, row checkboxes and the
+ * checked rows to restore, row numbers.
+ */
+function tableExtras() {
+  const c = state.cols;
+  const order = c.keepOrder && c.order?.key === viewKey() ? c.order.order : undefined;
+  const checks = state.api.keepChecks && state.api.checks?.key === viewKey() ? state.api.checks.sel : undefined;
+  return {
+    // Counts pin that many leading / trailing columns of any table (column lists, getColumn, getColumns);
+    // without them, columns marked pinned: 'left' | 'right' are pinned wherever they are.
+    pinnedColumns: c.left ?? undefined,
+    pinnedColumnsRight: c.right ?? undefined,
+    columnOrder: order,
+    rowSelection: state.grid.rowSelection,
+    selectedRows: state.grid.rowSelection ? checks : undefined,
+    rowHeader: state.grid.rowNumbers || state.grid.rowSelection ? undefined : false,
+  };
+}
+
+/** Theme beyond light / dark: the grid's CSS variables on its host. */
+function applyThemeVars() {
+  const host = $('#grid');
+  const a = state.adv;
+  if (a.accent) {
+    host.style.setProperty('--vg-accent', a.accent);
+    host.style.setProperty('--vg-sel-fill', `color-mix(in srgb, ${a.accent} 14%, transparent)`);
+    host.style.setProperty('--vg-sel-head', `color-mix(in srgb, ${a.accent} 22%, var(--vg-head))`);
+  } else {
+    ['--vg-accent', '--vg-sel-fill', '--vg-sel-head'].forEach((v) => host.style.removeProperty(v));
+  }
+  host.style.setProperty('--vg-font', `${a.fontSize}px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`);
 }
 
 /** Option changes that the grid applies in place (or rebuilds itself, keeping scroll and query). */
 function applyOptions() {
   if (!grid) return;
   const opts = { ...commonOptions() };
-  if (dataset?.virtual) { if (state.mode === 'table') opts.rowHeader = state.grid.rowNumbers ? undefined : false; }
+  if (state.mode === 'table') Object.assign(opts, tableExtras());
+  if (dataset?.live && state.mode === 'pivot') Object.assign(opts, pivotHooks());
+  else if (dataset?.live) opts.columns = liveColumns();
+  else if (dataset?.virtual) { /* columns come from the server */ }
   else if (state.mode === 'pivot') Object.assign(opts, pivotHooks());
-  else { opts.columns = tableColumns(); opts.rowSelection = state.grid.rowSelection; opts.rowHeader = state.grid.rowNumbers || state.grid.rowSelection ? undefined : false; }
+  else opts.columns = tableColumns();
   $('#grid').classList.toggle('no-zebra', !state.grid.zebra);
-  grid.setOptions(opts);
+  applyThemeVars();
+  return grid.setOptions(opts);
 }
 
 // ================================================================== view bar
@@ -912,8 +1223,9 @@ function applyOptions() {
 function renderSummary() {
   const el = $('#summary');
   if (!dataset) { el.textContent = ''; return; }
-  if (dataset.virtual) {
-    el.innerHTML = grid?.rowCount != null ? `<b>${fmtInt(grid.rowCount)}</b> rows × <b>${fmtInt(grid.columnCount)}</b> columns · computed on demand` : 'Loading layout…';
+  if (dataset.virtual || (dataset.live && state.mode === 'pivot')) {
+    const how = dataset.virtual ? 'computed on demand' : `grouped in ClickHouse from ${fmtInt(dataset.rows)} rows, block by block`;
+    el.innerHTML = grid?.rowCount != null ? `<b>${fmtInt(grid.rowCount)}</b> rows × <b>${fmtInt(grid.columnCount)}</b> columns · ${how}` : 'Loading layout…';
     return;
   }
   if (state.mode === 'pivot') {
@@ -971,8 +1283,9 @@ $('#gotoForm').addEventListener('submit', (e) => {
 });
 $('#resetView').addEventListener('click', () => {
   if (!grid) return;
-  grid.setOptions({ sort: [], filter: [], columnFilter: [] });
-  Promise.all([grid.setSort([]), grid.setFilter([]), grid.setColumnFilter?.([])]).catch(() => {});
+  const empty = { sort: [], filter: [], columnFilter: [] };
+  if (state.api.controlled) grid.setOptions({ query: empty });
+  grid.setQuery(empty).catch(() => {});
 });
 $('#refreshBtn').addEventListener('click', () => grid?.refresh());
 
@@ -1014,28 +1327,55 @@ function openMenu(e) {
   const items = [];
   items.push(['Copy selection', () => grid.copySelection()]);
   if (state.mode === 'pivot') {
-    if (!dataset.virtual) items.push(['Show records behind this cell', () => openDrill(e)]);
+    if (!dataset.virtual && !dataset.live) items.push(['Show records behind this cell', () => openDrill(e)]);
     items.push('-');
-    items.push(['Sort rows by this column, high → low', () => grid.setSort([{ column: e.colSource, direction: 'desc' }])]);
-    items.push(['Sort rows by this column, low → high', () => grid.setSort([{ column: e.colSource, direction: 'asc' }])]);
+    items.push(['Sort rows by this column, high → low', () => grid.setQuery({ sort: [{ column: e.colSource, direction: 'desc' }] })]);
+    items.push(['Sort rows by this column, low → high', () => grid.setQuery({ sort: [{ column: e.colSource, direction: 'asc' }] })]);
   } else {
     items.push('-');
-    items.push([`Sort by ${e.column?.title}, ascending`, () => grid.setSort([{ key: e.key, direction: 'asc' }])]);
-    items.push([`Sort by ${e.column?.title}, descending`, () => grid.setSort([{ key: e.key, direction: 'desc' }])]);
+    items.push([`Sort by ${e.column?.title}, ascending`, () => grid.setQuery({ sort: [{ key: e.key, direction: 'asc' }] })]);
+    items.push([`Sort by ${e.column?.title}, descending`, () => grid.setQuery({ sort: [{ key: e.key, direction: 'desc' }] })]);
     if (e.column?.type !== 'number' && e.text) {
-      const others = () => grid.getFilter().filter((f) => f.key !== e.key);
+      const others = () => grid.getQuery().filter.filter((f) => f.key !== e.key);
       items.push('-');
-      items.push([`Only "${e.text}"`, () => grid.setFilter([...others(), { key: e.key, op: 'in', values: [e.text] }])]);
-      items.push([`Exclude "${e.text}"`, () => grid.setFilter([...others(), { key: e.key, op: 'notin', values: [e.text] }])]);
+      items.push([`Only "${e.text}"`, () => grid.setQuery({ filter: [...others(), { key: e.key, op: 'in', values: [e.text] }] })]);
+      items.push([`Exclude "${e.text}"`, () => grid.setQuery({ filter: [...others(), { key: e.key, op: 'notin', values: [e.text] }] })]);
     }
     if (e.column?.type === 'number' && typeof e.value === 'number') {
-      const others = () => grid.getFilter().filter((f) => f.key !== e.key);
+      const others = () => grid.getQuery().filter.filter((f) => f.key !== e.key);
       items.push('-');
-      items.push([`${e.column.title} ≥ ${e.text}`, () => grid.setFilter([...others(), { key: e.key, op: 'range', min: e.value }])]);
-      items.push([`${e.column.title} ≤ ${e.text}`, () => grid.setFilter([...others(), { key: e.key, op: 'range', max: e.value }])]);
+      items.push([`${e.column.title} ≥ ${e.text}`, () => grid.setQuery({ filter: [...others(), { key: e.key, op: 'range', min: e.value }] })]);
+      items.push([`${e.column.title} ≤ ${e.text}`, () => grid.setQuery({ filter: [...others(), { key: e.key, op: 'range', max: e.value }] })]);
     }
-    if (e.row && !dataset.virtual) items.push('-', ['Copy row as JSON', () => { navigator.clipboard?.writeText(JSON.stringify(rowAsNamed(e.row), null, 2)); toast('Row copied as JSON'); }]);
+    if (e.row && !dataset.virtual && !dataset.live) items.push('-', ['Copy row as JSON', () => { navigator.clipboard?.writeText(JSON.stringify(rowAsNamed(e.row), null, 2)); toast('Row copied as JSON'); }]);
+    // Any column can be pinned, on either side.
+    const side = pinSideOf(e);
+    items.push('-');
+    if (side !== 'left') items.push([`Pin "${colTitle(e)}" left`, () => pinColumn(e, 'left')]);
+    if (side !== 'right') items.push([`Pin "${colTitle(e)}" right`, () => pinColumn(e, 'right')]);
+    if (side) items.push([`Unpin "${colTitle(e)}"`, () => pinColumn(e, null)]);
+    if (!dataset.virtual && e.key) {
+      const o = state.cols.opts[e.key] ?? {};
+      items.push('-');
+      items.push([`Align: ${o.align === 'center' ? 'end' : o.align === 'end' ? 'default' : 'center'}`, () => setColOpt(e.key, 'align', o.align === 'center' ? 'end' : o.align === 'end' ? undefined : 'center')]);
+      items.push([o.sortable === false ? 'Allow sorting this column' : 'Turn sorting off for this column', () => setColOpt(e.key, 'sortable', o.sortable === false ? undefined : false)]);
+      items.push([o.resizable === false ? 'Allow resizing this column' : 'Lock this column’s width', () => setColOpt(e.key, 'resizable', o.resizable === false ? undefined : false)]);
+      items.push([o.reorderable === false ? 'Allow dragging this column' : 'Lock this column’s position', () => setColOpt(e.key, 'reorderable', o.reorderable === false ? undefined : false)]);
+      items.push([o.highlight ? 'Remove highlight' : 'Highlight this column', () => setColOpt(e.key, 'highlight', o.highlight ? undefined : true)]);
+      items.push(['Hide this column', () => setColOpt(e.key, 'hidden', true)]);
+    }
   }
+  // Grid methods, on the cell that was clicked.
+  items.push('-');
+  if (state.mode === 'table') {
+    items.push(['Open this column’s filter', () => grid.openFilter(e.key ?? e.colSource)]);
+    items.push(['Toggle sort on this column', () => grid.toggleSort(e.key ?? e.colSource, false)]);
+    items.push(['Make this column 240 px wide', () => grid.setColumnWidth(e.colIndex, 240)]);
+  }
+  const range = grid.getSelection()?.ranges?.[0];
+  if (range && (range.r0 !== range.r1 || range.c0 !== range.c1)) items.push(['Merge the selected cells', () => mergeSelection(range)]);
+  if (merges.length) items.push([`Clear ${merges.length} merged cell${merges.length > 1 ? 's' : ''}`, () => { merges = []; grid.setMerges([]); }]);
+  items.push(['Select all', () => grid.selectAll()]);
   menu.replaceChildren(...items.map((it) => {
     if (it === '-') return document.createElement('hr');
     const b = document.createElement('button');
@@ -1053,6 +1393,79 @@ function openMenu(e) {
   menu.querySelector('button')?.focus();
 }
 function closeMenu() { $('#ctxMenu').hidden = true; }
+
+const colTitle = (e) => String(e.column?.title ?? e.key ?? `column ${e.colIndex + 1}`).slice(0, 28);
+
+/** Which side a column is pinned on: by key for column lists, by position against the counts otherwise. */
+function pinSideOf(e) {
+  const { left, right } = state.cols;
+  if (left != null || right != null || dataset.virtual) {
+    if (e.colIndex < (left ?? 0)) return 'left';
+    if (e.colIndex >= grid.columnCount - (right ?? 0)) return 'right';
+    return null;
+  }
+  return state.cols.pins[e.key] ?? null;
+}
+
+/**
+ * Pins any column. Column lists mark it `pinned: 'left' | 'right'` and the grid moves it to that side. Very
+ * wide tables pin by count, so the column is first moved next to the pinned block (setColumnOrder with
+ * compact runs: a million columns stay a few entries), then the count grows by one.
+ */
+function pinColumn(e, side) {
+  if (!dataset.virtual && state.cols.left == null && state.cols.right == null && e.key) {
+    if (side) state.cols.pins[e.key] = side; else delete state.cols.pins[e.key];
+    saveState();
+    paintColumnsUi();
+    applyOptions();
+    toast(side ? `Pinned "${colTitle(e)}" ${side}` : `Unpinned "${colTitle(e)}"`);
+    return;
+  }
+  const total = grid.columnCount;
+  let left = state.cols.left ?? 0;
+  let right = state.cols.right ?? 0;
+  const s = e.colSource;
+  const current = pinSideOf(e);
+  let pos;
+  if (side === 'left') { pos = left; left++; if (current === 'right') right--; }
+  else if (side === 'right') { pos = total - 1; right++; if (current === 'left') left--; }
+  else if (current === 'left') { pos = left - 1; left--; }
+  else { pos = total - right; right--; }
+  const order = moveColumn(grid.getColumnOrder(), s, Math.max(0, Math.min(total - 1, pos)), total);
+  grid.setColumnOrder(order);
+  state.cols.left = Math.max(0, left);
+  state.cols.right = Math.max(0, right);
+  if (state.cols.keepOrder) state.cols.order = { key: viewKey(), order };
+  saveState();
+  paintColumnsUi();
+  applyOptions();
+  toast(side ? `Pinned "${colTitle(e)}" ${side}` : `Unpinned "${colTitle(e)}"`);
+}
+
+function setColOpt(key, prop, value) {
+  const o = { ...(state.cols.opts[key] ?? {}) };
+  if (value === undefined) delete o[prop]; else o[prop] = value;
+  state.cols.opts[key] = o;
+  saveState();
+  paintColumnsUi();
+  applyOptions();
+}
+
+/** Merges the selected range (setMerges takes source coordinates, so reordered columns are mapped back). */
+function mergeSelection(r) {
+  const r0 = Math.min(r.r0, r.r1), r1 = Math.max(r.r0, r.r1);
+  const c0 = Math.min(r.c0, r.c1), c1 = Math.max(r.c0, r.c1);
+  const order = grid.getColumnOrder();
+  const list = state.mode === 'table' && !dataset.virtual ? (dataset.live ? liveColumns() : tableColumns()) : null;
+  const src = (c) => (list && typeof order[c] === 'string' ? list.findIndex((col) => col.key === order[c]) : c);
+  const cols = [];
+  for (let c = c0; c <= c1; c++) cols.push(src(c));
+  const contiguous = cols.every((s, i) => i === 0 || s === cols[i - 1] + 1);
+  if (!contiguous) { toast('Those columns are not next to each other in the data, so they can’t be merged.'); return; }
+  merges.push({ r0, c0: cols[0], nr: r1 - r0 + 1, nc: cols.length, label: grid.cellText(r0, c0) ?? '' });
+  grid.setMerges(merges);
+  setEvent(`Merged ${r1 - r0 + 1} × ${cols.length} cells (grid.setMerges)`);
+}
 document.addEventListener('pointerdown', (e) => { if (!$('#ctxMenu').contains(e.target)) closeMenu(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
 
@@ -1075,7 +1488,7 @@ async function openDrill(e) {
     $('#drillTitle').textContent = res.measure ? `${res.measure}: ${res.value == null ? '–' : f.format(res.value)}` : 'Records behind this cell';
     $('#drillMeta').innerHTML = `${res.path.length ? res.path.map((p) => `<span>${escapeHtml(p)}</span>`).join('') : '<span>All records</span>'}<span><b>${fmtInt(res.total)}</b> records${res.total > res.rows.length ? ` (first ${fmtInt(res.rows.length)} shown)` : ''}</span>`;
     const columns = dataset.fields.map((fd) => ({ key: fd.key, title: fd.name, type: fd.kind === 'num' ? 'number' : undefined, filter: fd.kind === 'num' ? undefined : 'values', format: fd.kind === 'num' ? (v) => (v == null ? '' : /id$/i.test(fd.name) ? String(v) : f.format(v)) : undefined }));
-    drillGrid = createGrid($('#drillGrid'), { dataSource: createArraySource(res.rows, { columns }), columns, theme: state.theme, ariaLabel: 'Records behind the cell' });
+    drillGrid = createGrid($('#drillGrid'), { data: res.rows, columns, theme: state.theme, ariaLabel: 'Records behind the cell' });
   } catch (err) {
     $('#drillMeta').textContent = `Could not load the records: ${err.message}`;
   }
@@ -1139,7 +1552,10 @@ function renderPerf() {
   const d = dataset;
   const html = [];
   html.push('<div class="tile-group-title">Dataset</div>');
-  if (d?.virtual) {
+  if (d?.live) {
+    html.push(tile('Rows', fmtInt(d.rows), `${d.schema.columns.length} columns`));
+    html.push(tile('Stored here', '0 B', `in ${d.live.provider}, queried live`, 'good'));
+  } else if (d?.virtual) {
     html.push(tile('Rows', fmtInt(d.rows), `${fmtInt(state.mode === 'pivot' ? 68 * d.years : d.cols)} columns`));
     html.push(tile('Stored data', '0 B', 'every cell computed on request', 'good'));
   } else {
@@ -1148,7 +1564,16 @@ function renderPerf() {
   }
 
   html.push('<div class="tile-group-title">Server</div>');
-  if (d?.virtual) {
+  if (d?.live) {
+    // ClickHouse reports its own query time; Socrata doesn't, so its round trip stands in.
+    const ok = (k) => metrics.log.filter((e) => e.kind === k && e.status === 'ok');
+    const time = (e) => (Number.isFinite(e?.serverMs) ? e.serverMs : e?.total);
+    const pages = ok(state.mode === 'pivot' ? 'cells' : 'rows');
+    const lastCount = ok(state.mode === 'pivot' ? 'layout' : 'count').at(-1);
+    const measured = d.provider === 'clickhouse' ? 'database time' : 'round trip (no server timing)';
+    html.push(tile(state.mode === 'pivot' ? 'Cells query avg' : 'Page query avg', fmtMs(avg(pages.map(time))), `${measured} · max ${fmtMs(pages.length ? Math.max(...pages.map(time)) : null)}`, avg(pages.map(time)) > 3000 ? 'warn' : ''));
+    html.push(tile(state.mode === 'pivot' ? 'Last layout query' : 'Last count', fmtMs(time(lastCount)), state.mode === 'pivot' ? 'groups of one level' : lastCount ? 'counting matching rows' : 'no filter counted yet'));
+  } else if (d?.virtual) {
     const lay = [...metrics.log].reverse().find((e) => e.kind === 'layout' && e.status === 'ok');
     const cellsReq = metrics.log.filter((e) => e.kind === 'cells' && e.status === 'ok');
     html.push(tile('Layout compute', fmtMs(lay?.serverMs), 'last sort / filter on the server'));
@@ -1259,7 +1684,7 @@ function drawFps() {
 function renderLog() {
   const rows = metrics.log.slice(-60).reverse();
   $('#logCount').textContent = `${fmtInt(metrics.requests)} total`;
-  $('#logBody').innerHTML = rows.map((e) => `<tr class="${e.status}" title="${escapeHtml(e.error ?? `${e.kind} · ${e.detail} · latency ${Math.round(e.latency)} ms${e.bytes ? ` · ${fmtBytes(e.bytes)}` : ''}`)}">
+  $('#logBody').innerHTML = rows.map((e) => `<tr class="${e.status}" title="${escapeHtml(e.error ?? `${e.kind} · ${e.detail} · latency ${Math.round(e.latency)} ms${e.bytes ? ` · ${fmtBytes(e.bytes)}` : ''}${e.query ? `\n\n${e.query}` : ''}`)}">
     <td>${e.kind}</td><td>${escapeHtml(e.detail)}</td><td class="r">${e.status === 'ok' ? fmtMs(e.serverMs) : e.status === 'pending' ? '…' : e.status === 'aborted' ? 'cancelled' : 'failed'}</td><td class="r">${e.status === 'pending' ? fmtMs(performance.now() - e.t0) : fmtMs(e.total)}</td></tr>`).join('');
 }
 
@@ -1339,8 +1764,57 @@ function optionLines() {
   if (state.theme !== 'auto') out.push(`theme: '${state.theme}',`);
   for (const [k, def] of [['rowHeight', 28], ['headerHeight', 34], ['columnWidth', 132]]) if (g[k] !== def) out.push(`${k}: ${g[k]},`);
   if (g.selection !== 'multi') out.push(`selection: '${g.selection}',`);
-  for (const k of ['sortable', 'multiSort', 'filterable', 'resizable', 'reorderable', 'expandable', 'copy', 'keyboard', 'notices']) if (g[k] !== D[k]) out.push(`${k}: ${g[k]},`);
+  for (const k of ['multiSort', 'resizable', 'reorderable', 'expandable', 'copy', 'keyboard', 'notices']) if (g[k] !== D[k]) out.push(`${k}: ${g[k]},`);
+  const a = state.adv, c = state.cols, api = state.api;
+  // Sorting and filtering: on/off, or a rule per column / level.
+  const rule = {
+    numbers: "(target) => target.axis !== 'cols' || numberKeys.has(target.key)",
+    noText: "(target) => !(target.axis === 'cols' && textKeys.has(target.key))",
+    topLevel: "(target) => target.axis !== 'rows' || target.level === 0",
+  }[a.rules];
+  if (!g.sortable) out.push('sortable: false,'); else if (rule && a.rules !== 'noText') out.push(`sortable: ${rule},`);
+  if (!g.filterable) out.push('filterable: false,'); else if (rule) out.push(`filterable: ${rule},`);
+  if (state.mode === 'table') {
+    if (c.left != null) out.push(`pinnedColumns: ${c.left},`);
+    if (c.right != null) out.push(`pinnedColumnsRight: ${c.right},`);
+    if (c.keepOrder && c.order?.key === viewKey()) out.push(`columnOrder: ${JSON.stringify(c.order.order).slice(0, 160)},`, "onColumnOrderChange: (order) => localStorage.setItem('order', JSON.stringify(order)),");
+    if (g.rowSelection) out.push('rowSelection: true,', 'onRowSelectionChange: (sel) => save(sel),');
+    if (g.rowSelection && api.keepChecks && api.checks?.key === viewKey()) out.push(`selectedRows: ${JSON.stringify(api.checks.sel).slice(0, 160)},`);
+    if (!g.rowNumbers && !g.rowSelection) out.push('rowHeader: false,');
+  }
+  if (c.minWidth !== 48) out.push(`minColumnWidth: ${c.minWidth},`);
+  if (api.blockRows !== 100 || api.blockCols !== 20) out.push(`advanced: { blockRows: ${api.blockRows}, blockCols: ${api.blockCols} },`);
+  if (a.lang !== 'en') out.push(`messages: { noRows: ${JSON.stringify(LANGUAGES[a.lang].messages.noRows)}, apply: ${JSON.stringify(LANGUAGES[a.lang].messages.apply)}, clear: ${JSON.stringify(LANGUAGES[a.lang].messages.clear)} /* … */ },`);
+  if (a.customHeader) out.push("renderHeader: (el, { label, column, sorted }) => { el.innerHTML = `<b>${column?.type === 'number' ? '#' : 'A'}</b> ${label}${sorted ? (sorted === 'asc' ? ' ↑' : ' ↓') : ''}`; },");
+  if (a.customEmpty) out.push("renderEmpty: (el, { filtered }) => { el.textContent = filtered ? 'Nothing matches these filters.' : 'This table is empty.'; },");
+  if (a.rowClass === 'every5') out.push("rowClass: (row) => (row % 5 === 4 ? 'highlight' : ''),");
+  if (a.rowClass === 'negative') out.push("rowClass: (row) => (Object.values(grid.getRow(row) ?? {}).some((v) => v < 0) ? 'negative' : ''),");
+  const q = api.query?.key === viewKey() ? api.query : null;
+  const start = {};
+  if (q?.sort?.length) start.sort = q.sort;
+  if (q?.filter?.length) start.filter = q.filter;
+  if (api.controlled) {
+    out.push(`query: ${JSON.stringify({ sort: [], filter: [], columnFilter: [], ...start }).slice(0, 200)}, // yours: the grid shows what you pass`);
+    out.push('onQueryChange: (query) => { saveToUrl(query); grid.setOptions({ query }); },');
+  } else if (start.sort || start.filter) out.push(`defaultQuery: ${JSON.stringify(start).slice(0, 200)},`);
+  if (merges.length) out.push(`onReady: (g) => g.setMerges(${JSON.stringify(merges).slice(0, 200)}),`);
   return out;
+}
+
+/** Column options the user set from the menu, as code (pins, align, locks, highlight, hidden, custom filter). */
+function columnPrefsCode(c) {
+  const parts = [];
+  const pin = state.cols.pins[c.key];
+  if (pin) parts.push(`pinned: '${pin}'`);
+  const o = state.cols.opts[c.key] ?? {};
+  if (o.align) parts.push(`align: '${o.align}'`);
+  if (o.sortable === false) parts.push('sortable: false');
+  if (o.resizable === false) parts.push('resizable: false');
+  if (o.reorderable === false) parts.push('reorderable: false');
+  if (o.highlight) parts.push("className: 'highlight', headerClass: 'highlight'");
+  if (o.hidden) parts.push('hidden: true');
+  if (state.adv.customFilter && c.type === 'number') parts.push("filter: { op: 'atLeast', render: atLeastSlider }");
+  return parts;
 }
 function formatterCode() {
   const { style, decimals } = state.format;
@@ -1353,6 +1827,8 @@ const indent = (lines, n) => lines.map((l) => ' '.repeat(n) + l).join('\n');
 function clientCode() {
   if (!dataset) return '// Load some data first.';
   const opts = optionLines();
+  if (dataset.live && state.mode === 'pivot') return livePivotCode(opts);
+  if (dataset.live) return liveClientCode(opts);
   if (dataset.virtual) {
     return `import { createGrid, createHttpSource } from '@borealjs/grid-core';
 import '@borealjs/grid-core/style.css';
@@ -1365,7 +1841,7 @@ const dataSource = createHttpSource({
 });
 
 const grid = createGrid(document.getElementById('grid'), {
-  dataSource,
+  data: dataSource,
   ariaLabel: '${state.mode === 'pivot' ? 'Pivot table' : 'Data table'}',
 ${indent(opts, 2)}
 });`;
@@ -1409,7 +1885,7 @@ const dataSource = {
 ${formatterCode()}
 
 const grid = createGrid(document.getElementById('grid'), {
-  dataSource,
+  data: dataSource,
   ariaLabel: 'Pivot table',
 ${indent(opts, 2)}${opts.length ? '\n' : ''}  format: (value) => (value == null ? '' : number.format(value)),${cond === 'negative' ? "\n  cellClass: (value) => (value < 0 ? 'negative' : '')," : cond === 'heatmap' ? "\n  // Heatmap: bucket each value within its measure's range (from your layout response)\n  cellClass: (value, { rowSource, colSource }) => heatClass(value, rowSource, colSource)," : cond === 'bars' ? "\n  renderCell: (el, { value, text }) => drawBar(el, value, text), // a bar behind the number" : ''}
   onCellDoubleClick: ({ rowSource, colSource }) => openRecords(rowSource, colSource), // drill-through
@@ -1422,12 +1898,12 @@ ${indent(opts, 2)}${opts.length ? '\n' : ''}  format: (value) => (value == null 
   const colLines = cols.map((c) => {
     const parts = [`key: '${c.key}'`, `title: '${c.title.replace(/'/g, "\\'")}'`];
     if (c.type) parts.push(`type: '${c.type}'`);
-    if (c.filter) parts.push(`filter: '${c.filter}'`);
-    if (c.pinned) parts.push('pinned: true');
+    if (typeof c.filter === 'string') parts.push(`filter: '${c.filter}'`);
     if (c.type === 'number') parts.push('format: money');
+    parts.push(...columnPrefsCode(c));
     return `{ ${parts.join(', ')} },`;
   });
-  return `import { createGrid, createRowSource } from '@borealjs/grid-core';
+  return `import { createGrid } from '@borealjs/grid-core';
 import '@borealjs/grid-core/style.css';
 
 ${formatterCode().replace('const number', 'const nf')}
@@ -1438,7 +1914,7 @@ ${indent(colLines, 2)}
 ];
 
 // Rows by offset / limit, as most REST, GraphQL and SQL backends serve them.
-const dataSource = createRowSource({
+const dataSource = {
   pageSize: ${state.server.pageSize},
   async getRows({ offset, limit, sort, filter, signal }) {
     const params = new URLSearchParams({ offset, limit, sort: JSON.stringify(sort), filter: JSON.stringify(filter) });
@@ -1449,15 +1925,131 @@ const dataSource = createRowSource({
     const res = await fetch(\`/api/values?key=\${key}&q=\${encodeURIComponent(search)}&limit=\${limit}\`, { signal });
     return res.json(); // { values: [...], total, matches }
   },
-});
+};
 
 const grid = createGrid(document.getElementById('grid'), {
-  dataSource,
+  data: dataSource,
   columns,
   getRowId: (row) => row.id,
   ariaLabel: 'Data table',
-${indent(opts, 2)}${opts.length ? '\n' : ''}${state.grid.rowSelection ? '  rowSelection: true,\n  onRowSelectionChange: (sel) => console.log(sel),\n' : ''}${!state.grid.rowNumbers && !state.grid.rowSelection ? '  rowHeader: false,\n' : ''}  onCellDoubleClick: ({ row }) => openDetail(row),
+${indent(opts, 2)}${opts.length ? '\n' : ''}  onCellDoubleClick: ({ row }) => openDetail(row),
 });`;
+}
+
+function livePivotCode(opts) {
+  const p = state.pivot;
+  const name = (i) => (i === SIGMA ? 'Σ Values' : dataset.fields[i].name);
+  return `import { createGrid } from '@borealjs/grid-core';
+import '@borealjs/grid-core/style.css';
+// live-pivot.js is in examples/playground: it turns the grid's pivot calls into ClickHouse queries.
+import { createClickHousePivot, liveFields } from './live-pivot.js';
+
+// Fields: the table's columns plus year / month of each date column (see liveFields).
+const fields = liveFields(columns); // columns from system.columns: [{ key, name, kind }]
+const field = (name) => fields.findIndex((f) => f.name === name);
+
+const dataSource = createClickHousePivot({
+  table: '${dataset.table}',
+  fields,
+  cfg: {
+    rows: [${p.rows.map((i) => (i === SIGMA ? '-1 /* Σ Values */' : `field('${name(i)}')`)).join(', ')}],
+    cols: [${p.cols.map((i) => (i === SIGMA ? '-1 /* Σ Values */' : `field('${name(i)}')`)).join(', ')}],
+    values: [${p.values.map((v) => `{ field: field('${dataset.fields[v.field].name}'), agg: '${v.agg}' }`).join(', ')}],
+    subtotals: ${p.subtotals}, grandTotals: ${p.grandTotals},
+    rowHeight: ${state.grid.rowHeight}, colWidth: ${state.grid.columnWidth}, maxCells: ${state.server.maxCells},
+  },
+  // Called for every query, e.g. to log it or add auth: run(signal) resolves with { result, serverMs, bytes, query }.
+  track: (kind, detail, run, signal) => run(signal).then((r) => r.result),
+});
+
+// What it sends, block by block (see "Server contract" for the real ones):
+//   getLayout: SELECT <level keys>, uniqExact(<leaf>) … GROUP BY <level keys>            one per level
+//   getLabels: SELECT … ORDER BY … LIMIT 200 OFFSET n BY <parent keys>                  names on screen
+//   getCells:  SELECT … WHERE <groups on screen> GROUP BY … UNION ALL …                 one per request
+
+const grid = createGrid(document.getElementById('grid'), {
+  data: dataSource,
+  ariaLabel: '${dataset.label.replace(/'/g, "\\'")} pivot',
+${indent(opts, 2)}
+});`;
+}
+
+function liveClientCode(opts) {
+  const cols = dataset.schema.columns.slice(0, 6);
+  const colLines = cols.map((c) => `{ key: '${c.name}', title: '${String(c.title ?? c.name).replace(/'/g, "\\'")}'${c.kind === 'number' ? ", type: 'number'" : c.kind === 'date' ? ", type: 'date'" : c.kind === 'values' ? ", filter: 'values'" : ''} },`);
+  if (dataset.schema.columns.length > cols.length) colLines.push(`// … ${dataset.schema.columns.length - cols.length} more`);
+  const common = `const columns = [
+${indent(colLines, 2)}
+];
+
+const grid = createGrid(document.getElementById('grid'), {
+  data: dataSource,
+  columns,
+  ariaLabel: '${dataset.label.replace(/'/g, "\\'")}',
+${indent(opts, 2)}
+});`;
+  if (dataset.provider === 'clickhouse') {
+    return `import { createGrid } from '@borealjs/grid-core';
+import '@borealjs/grid-core/style.css';
+
+// Straight from the browser to ClickHouse's HTTP interface (read-only user, public data).
+const sql = (query, signal) =>
+  fetch('https://play.clickhouse.com/?user=explorer&default_format=JSONCompact', { method: 'POST', body: query, signal })
+    .then((res) => (res.ok ? res.json() : res.text().then((t) => Promise.reject(new Error(t)))));
+
+const id = (name) => '\`' + name.replace(/\`/g, '\\\\\`') + '\`';
+const str = (s) => "'" + String(s).replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'") + "'";
+const whereOf = (filter) => {
+  const parts = filter.map((f) =>
+    f.op === 'range' ? [f.min != null && \`\${id(f.key)} >= \${Number(f.min)}\`, f.max != null && \`\${id(f.key)} <= \${Number(f.max)}\`].filter(Boolean).join(' AND ')
+    : f.op === 'contains' ? \`positionCaseInsensitiveUTF8(toString(\${id(f.key)}), \${str(f.text)}) > 0\`
+    : \`toString(\${id(f.key)}) \${f.op === 'in' ? 'IN' : 'NOT IN'} (\${f.values.map(str).join(', ')})\`);
+  return parts.length ? \` WHERE \${parts.join(' AND ')}\` : '';
+};
+// End with the table's sorting key (${dataset.schema.sortingKey.join(', ') || 'none'}) so pages never overlap.
+const orderOf = (sort) => ' ORDER BY ' + [...sort.map((s) => \`\${id(s.key)} \${s.direction === 'desc' ? 'DESC' : 'ASC'}\`), ${dataset.schema.sortingKey.map((k) => `'${k}'`).join(', ')}].join(', ');
+
+const counts = new Map();
+const dataSource = {
+  pageSize: ${state.server.pageSize},
+  async getRows({ offset, limit, sort, filter, signal }) {
+    const where = whereOf(filter);
+    if (!counts.has(where)) counts.set(where, sql(\`SELECT count() FROM ${dataset.table}\${where}\`, signal).then((r) => r.data[0][0]));
+    const page = await sql(\`SELECT * FROM ${dataset.table}\${where}\${orderOf(sort)} LIMIT \${limit} OFFSET \${offset}\`, signal);
+    const rows = page.data.map((values) => Object.fromEntries(page.meta.map((m, i) => [m.name, values[i]])));
+    return { rows, total: await counts.get(where) };
+  },
+};
+
+${common}`;
+  }
+  return `import { createGrid } from '@borealjs/grid-core';
+import '@borealjs/grid-core/style.css';
+
+// Socrata's SoQL API, straight from the browser (public data; add an app token for higher limits).
+const api = (params, signal) =>
+  fetch(\`https://data.cityofnewyork.us/resource/${dataset.table}.json?\${new URLSearchParams(params)}\`, { signal }).then((res) => res.json());
+
+const str = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+const whereOf = (filter) => filter.map((f) =>
+  f.op === 'range' ? [f.min != null && \`\${f.key} >= \${Number(f.min)}\`, f.max != null && \`\${f.key} <= \${Number(f.max)}\`].filter(Boolean).join(' AND ')
+  : f.op === 'contains' ? \`upper(\${f.key}) like \${str('%' + f.text.toUpperCase() + '%')}\`
+  : \`\${f.key} \${f.op === 'in' ? 'in' : 'not in'} (\${f.values.map(str).join(', ')})\`).join(' AND ');
+
+const counts = new Map();
+const dataSource = {
+  pageSize: ${state.server.pageSize},
+  async getRows({ offset, limit, sort, filter, signal }) {
+    const where = whereOf(filter);
+    const $where = where ? { $where: where } : {};
+    if (!counts.has(where)) counts.set(where, api({ $select: 'count(*)', ...$where }, signal).then((r) => Number(r[0].count)));
+    const $order = [...sort.map((s) => \`\${s.key} \${s.direction === 'desc' ? 'DESC' : 'ASC'}\`), ':id'].join(', '); // :id keeps pages stable
+    const rows = await api({ $order, $limit: limit, $offset: offset, ...$where }, signal);
+    return { rows, total: await counts.get(where) };
+  },
+};
+
+${common}`;
 }
 
 function truncateJson(value, depth = 0) {
@@ -1485,7 +2077,7 @@ function serverCode() {
   };
   const head = `// The exact requests this page just made and what the server answered (long arrays shortened).
 // Implement these in your backend and the grid works the same way against it.\n\n`;
-  if (state.mode === 'pivot') {
+  if (state.mode === 'pivot' && !dataset?.live) {
     return head + [
       show('getLayout: the row and column trees for the current sort and filters', 'layout', (s) => ({ args: s.args, result: (({ info, ...r }) => r)(s.result) })),
       show('getCells: values for the rectangles on screen', 'cells'),
@@ -1493,12 +2085,26 @@ function serverCode() {
       show('getFilterValues: a dimension’s values for its filter', 'values'),
     ].join('\n\n');
   }
+  if (dataset?.live && state.mode === 'pivot') {
+    return `// The last queries this page sent to play.clickhouse.com for the pivot and what came back (long arrays shortened).\n\n` + [
+      show('getLayout: the groups of one level and their child counts (one query per level)', 'layout'),
+      show('getLabels: a page of leaf names for every group on screen (LIMIT … BY)', 'labels'),
+      show('getCells: the values of the blocks on screen, totals included (one SELECT per kind of cell)', 'cells'),
+    ].join('\n\n');
+  }
+  if (dataset?.live) {
+    return `// The last queries this page sent to ${LIVE_PROVIDERS[dataset.provider].host} and what came back (long arrays shortened).\n\n` + [
+      show('getRows: one page of the sorted, filtered rows', 'rows'),
+      show('count: how many rows match (once per filter)', 'count'),
+      show('getFilterValues: a column’s distinct values', 'values'),
+    ].join('\n\n');
+  }
   return head + [show('getRows: one page of the sorted, filtered rows', 'rows'), show('getFilterValues', 'values')].join('\n\n');
 }
 
 function renderCode() {
   $$('#codeSeg button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.v === codePart)));
-  $('#codeOut').textContent = codePart === 'client' ? clientCode() : serverCode();
+  $('#codeOut').textContent = codePart === 'client' ? clientCode() : codePart === 'react' ? toReact(clientCode()) : serverCode();
 }
 $('#codeBtn').addEventListener('click', () => { renderCode(); $('#codeDialog').showModal(); });
 $('#codeSeg').addEventListener('click', (e) => { const v = e.target.closest('button')?.dataset.v; if (v) { codePart = v; renderCode(); } });
@@ -1531,7 +2137,11 @@ function applyTheme() {
   else document.documentElement.dataset.theme = state.theme;
 }
 bindSeg('#themeSeg', () => state.theme, (v) => { state.theme = v; applyTheme(); grid?.setOptions({ theme: v }); drillGrid?.setOptions({ theme: v }); setTimeout(renderPerf, 50); });
-bindSeg('#modeSeg', () => state.mode, (v) => { state.mode = v; rebuildGrid(); });
+bindSeg('#modeSeg', () => state.mode, (v) => {
+  if (dataset?.live && dataset.provider !== 'clickhouse' && v === 'pivot') { toast('NYC Open Data has no grouping sets, so it shows rows only. ClickHouse tables can pivot.'); return; }
+  state.mode = v;
+  rebuildGrid();
+});
 
 $$('#sourceTabs button').forEach((b) => b.addEventListener('click', () => {
   $$('#sourceTabs button').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
@@ -1551,9 +2161,9 @@ function paintGen() {
 gen.addEventListener('submit', (e) => {
   e.preventDefault();
   state.source.rows = parseCount(gen.rows.value) || 1000;
-  state.source.dims = clamp(Number(gen.dims.value) || 1, 1, 40);
-  state.source.measures = clamp(Number(gen.measures.value) || 1, 1, 40);
-  state.source.years = clamp(Number(gen.years.value) || 1, 1, 30);
+  state.source.dims = Math.max(1, Number(gen.dims.value) || 1);
+  state.source.measures = Math.max(1, Number(gen.measures.value) || 1);
+  state.source.years = Math.max(1, Number(gen.years.value) || 1);
   state.source.seed = Number(gen.seed.value) || 1;
   paintGen();
   generateData();
@@ -1563,6 +2173,26 @@ $('#rowPresets').addEventListener('click', (e) => {
   if (!v) return;
   gen.rows.value = fmtInt(Number(v));
   gen.requestSubmit();
+});
+
+// Live databases
+const lf = $('#liveForm');
+function paintLive() {
+  const p = LIVE_PROVIDERS[state.live.provider] ?? LIVE_PROVIDERS.clickhouse;
+  lf.provider.value = state.live.provider;
+  lf.table.replaceChildren(...p.tables.map((t) => new Option(`${t.label} · ${t.note}`, t.table)));
+  if (p.tables.some((t) => t.table === state.live.table)) lf.table.value = state.live.table;
+  $('#liveHint').textContent = state.live.provider === 'clickhouse'
+    ? 'Real SQL over HTTP to the public ClickHouse playground (read-only user, 60 s per query). Pages, counts and value lists are each one query. Set the latency above to 0 to see only the real network.'
+    : 'Real queries to NYC Open Data’s public API (SoQL). Expect seconds per page on the big datasets: a good look at how the grid copes with a slow backend.';
+}
+lf.provider.addEventListener('change', () => { state.live.provider = lf.provider.value; state.live.table = LIVE_PROVIDERS[state.live.provider].tables[0].table; paintLive(); });
+lf.table.addEventListener('change', () => { state.live.table = lf.table.value; });
+lf.addEventListener('submit', (e) => {
+  e.preventDefault();
+  state.live.provider = lf.provider.value;
+  state.live.table = lf.table.value;
+  loadLive();
 });
 
 // Virtual data
@@ -1613,15 +2243,15 @@ function paintServer() {
   $('#maxCells').value = s.maxCells;
   $$('#latencyPresets button').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.ms) === s.latency)));
 }
-function setLatency(v) { state.server.latency = clamp(Math.round(Number(v) || 0), 0, 60000); paintServer(); saveState(); renderPerf(); }
+function setLatency(v) { state.server.latency = Math.max(0, Math.round(Number(v) || 0)); paintServer(); saveState(); renderPerf(); }
 $('#latency').addEventListener('input', (e) => setLatency(e.target.value));
 $('#latencyRange').addEventListener('input', (e) => setLatency(e.target.value));
 $('#latencyPresets').addEventListener('click', (e) => { const v = e.target.closest('button')?.dataset.ms; if (v !== undefined) setLatency(v); });
-$('#jitter').addEventListener('input', (e) => { state.server.jitter = clamp(Number(e.target.value) || 0, 0, 10000); saveState(); });
+$('#jitter').addEventListener('input', (e) => { state.server.jitter = Math.max(0, Number(e.target.value) || 0); saveState(); });
 $('#failRate').addEventListener('input', (e) => { state.server.failRate = clamp(Number(e.target.value) || 0, 0, 100); saveState(); });
 // Page and request sizes are part of the data source: a new grid picks them up.
-$('#pageSize').addEventListener('change', (e) => { state.server.pageSize = clamp(Number(e.target.value) || 100, 10, 5000); paintServer(); saveState(); if (state.mode === 'table') rebuildGrid(); });
-$('#maxCells').addEventListener('change', (e) => { state.server.maxCells = clamp(Number(e.target.value) || 20000, 500, 200000); paintServer(); saveState(); if (state.mode === 'pivot') rebuildGrid(); });
+$('#pageSize').addEventListener('change', (e) => { state.server.pageSize = Math.max(1, Number(e.target.value) || 100); paintServer(); saveState(); if (state.mode === 'table') rebuildGrid(); });
+$('#maxCells').addEventListener('change', (e) => { state.server.maxCells = Math.max(1, Number(e.target.value) || 20000); paintServer(); saveState(); if (state.mode === 'pivot') rebuildGrid(); });
 
 // Grid options
 const OPT_INPUTS = {
@@ -1634,7 +2264,7 @@ for (const [id, [key, type, pivotLayout]] of Object.entries(OPT_INPUTS)) {
   const el = $(`#${id}`);
   if (type === 'bool') el.checked = state.grid[key]; else el.value = state.grid[key];
   el.addEventListener('change', () => {
-    state.grid[key] = type === 'bool' ? el.checked : type === 'num' ? clamp(Number(el.value) || DEFAULTS.grid[key], Number(el.min), Number(el.max)) : el.value;
+    state.grid[key] = type === 'bool' ? el.checked : type === 'num' ? Math.max(1, Number(el.value) || DEFAULTS.grid[key]) : el.value;
     if (type === 'num') el.value = state.grid[key];
     saveState();
     // Pivot row heights and column widths come from the layout, so the pivot reloads.
@@ -1646,7 +2276,132 @@ for (const [id, key] of [['fmtStyle', 'style'], ['fmtDecimals', 'decimals'], ['f
   el.value = state.format[key];
   el.addEventListener('change', () => { state.format[key] = el.value; saveState(); applyOptions(); selectionStats(); });
 }
-$('#pinnedCount').value = state.table.pinned;
+
+// Columns & pinning
+const numOrNull = (v) => (v === '' || v == null ? null : Math.max(0, Math.round(Number(v)) || 0));
+function paintColumnsUi() {
+  const c = state.cols;
+  $('#columnsSection').hidden = state.mode !== 'table';
+  $('#pinLeft').value = c.left ?? '';
+  $('#pinRight').value = c.right ?? '';
+  $('#minWidth').value = c.minWidth;
+  $('#keepOrder').checked = c.keepOrder;
+  // What is pinned or changed, with a way to undo each.
+  const items = [];
+  if (c.left != null || c.right != null) items.push(`<span>Pinned by count: first <b>${c.left ?? 0}</b>, last <b>${c.right ?? 0}</b></span>`);
+  else for (const [key, side] of Object.entries(c.pins)) items.push(`<span class="pin-chip">${side === 'left' ? '⇤' : '⇥'} ${escapeHtml(colName(key))} <button type="button" data-unpin="${escapeHtml(key)}" aria-label="Unpin">✕</button></span>`);
+  for (const [key, o] of Object.entries(c.opts)) {
+    const what = [o.align && `align ${o.align}`, o.sortable === false && 'no sort', o.resizable === false && 'fixed width', o.reorderable === false && 'fixed position', o.highlight && 'highlighted', o.hidden && 'hidden'].filter(Boolean);
+    if (what.length) items.push(`<span class="pin-chip">${escapeHtml(colName(key))}: ${what.join(', ')} <button type="button" data-clear="${escapeHtml(key)}" aria-label="Reset column">✕</button></span>`);
+  }
+  $('#pinnedList').innerHTML = items.join('') || '<span class="muted">No pinned or changed columns yet.</span>';
+}
+function colName(key) {
+  const f = dataset?.live ? dataset.schema.columns.find((c) => c.key === key) : dataset?.fields?.find((x) => x.key === key);
+  return f ? (f.title ?? f.name) : key;
+}
+$('#pinnedList').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.unpin) delete state.cols.pins[b.dataset.unpin];
+  if (b.dataset.clear) delete state.cols.opts[b.dataset.clear];
+  saveState(); paintColumnsUi(); applyOptions();
+});
+$('#pinLeft').addEventListener('change', (e) => { state.cols.left = numOrNull(e.target.value); saveState(); paintColumnsUi(); applyOptions(); });
+$('#pinRight').addEventListener('change', (e) => { state.cols.right = numOrNull(e.target.value); saveState(); paintColumnsUi(); applyOptions(); });
+$('#minWidth').addEventListener('change', (e) => { state.cols.minWidth = Math.max(1, Number(e.target.value) || 48); saveState(); applyOptions(); });
+$('#keepOrder').addEventListener('change', (e) => { state.cols.keepOrder = e.target.checked; if (!e.target.checked) state.cols.order = null; saveState(); });
+$('#resetColumns').addEventListener('click', () => {
+  Object.assign(state.cols, { pins: {}, left: null, right: null, opts: {}, order: null });
+  saveState(); paintColumnsUi(); rebuildGrid();
+});
+
+// Customise
+$('#advLang').replaceChildren(...Object.entries(LANGUAGES).map(([k, v]) => new Option(v.label, k)));
+function paintAdv() {
+  const a = state.adv;
+  $('#advHeader').checked = a.customHeader;
+  $('#advEmpty').checked = a.customEmpty;
+  $('#advFilter').checked = a.customFilter;
+  $('#advRowClass').value = a.rowClass;
+  $('#advRules').value = a.rules;
+  $('#advLang').value = a.lang;
+  $('#advFont').value = a.fontSize;
+  $('#advAccent').value = a.accent || '#2563eb';
+}
+const advChange = (key, value) => { state.adv[key] = value; saveState(); applyOptions(); };
+$('#advHeader').addEventListener('change', (e) => advChange('customHeader', e.target.checked));
+$('#advEmpty').addEventListener('change', (e) => advChange('customEmpty', e.target.checked));
+$('#advFilter').addEventListener('change', (e) => advChange('customFilter', e.target.checked));
+$('#advRowClass').addEventListener('change', (e) => advChange('rowClass', e.target.value));
+$('#advRules').addEventListener('change', (e) => advChange('rules', e.target.value));
+$('#advLang').addEventListener('change', (e) => advChange('lang', e.target.value));
+$('#advFont').addEventListener('change', (e) => advChange('fontSize', Math.max(1, Number(e.target.value) || 13)));
+$('#advAccent').addEventListener('input', (e) => { state.adv.accent = e.target.value; saveState(); applyThemeVars(); });
+$('#advAccentReset').addEventListener('click', () => { state.adv.accent = ''; paintAdv(); saveState(); applyThemeVars(); });
+
+// State & API
+function paintApi() {
+  $('#apiControlled').checked = state.api.controlled;
+  $('#apiKeepChecks').checked = state.api.keepChecks;
+  $('#apiBlockRows').value = state.api.blockRows;
+  $('#apiBlockCols').value = state.api.blockCols;
+}
+function renderStatePanel() {
+  if (!grid) return;
+  let q;
+  try { q = grid.getQuery(); } catch { return; }
+  const out = {
+    query: { sort: q.sort, filter: q.filter, columnFilter: q.columnFilter },
+    columnOrder: (() => { try { const o = grid.getColumnOrder(); return o.length > 12 ? [...o.slice(0, 12), `… ${o.length - 12} more`] : o; } catch { return undefined; } })(),
+    checked: state.grid.rowSelection ? { count: grid.checkedCount?.(), selection: grid.getRowSelection?.() } : 'row checkboxes are off (Grid options)',
+    pinned: state.mode === 'table' ? (state.cols.left != null || state.cols.right != null ? { pinnedColumns: state.cols.left ?? 0, pinnedColumnsRight: state.cols.right ?? 0 } : state.cols.pins) : 'pivots keep their row headers fixed',
+    merges: merges.length ? merges : undefined,
+    visibleRange: grid.visibleRange,
+  };
+  $('#stateOut').textContent = JSON.stringify(out, null, 2);
+  $('#stateNote').textContent = state.api.controlled ? 'controlled: the page applies every change' : 'uncontrolled';
+}
+$('#apiControlled').addEventListener('change', (e) => { state.api.controlled = e.target.checked; saveState(); rebuildGrid(); });
+$('#apiKeepChecks').addEventListener('change', (e) => { state.api.keepChecks = e.target.checked; if (!e.target.checked) state.api.checks = null; saveState(); });
+/** Checks set from code aren't reported by onRowSelectionChange (it is for the user's clicks): save them here. */
+function setChecks(sel) {
+  grid.setRowSelection(sel);
+  if (state.api.keepChecks) { state.api.checks = { key: viewKey(), sel: grid.getRowSelection() }; saveState(); }
+  const n = grid.checkedCount?.();
+  setEvent(`${fmtInt(n ?? 0)} row${n === 1 ? '' : 's'} checked (setRowSelection)`);
+  renderStatePanel();
+}
+
+/** Turns row checkboxes on if needed, and waits until the grid has rebuilt with them. */
+const needChecks = async () => {
+  if (state.mode !== 'table') { toast('Row checkboxes are for table views.'); return false; }
+  if (!state.grid.rowSelection) {
+    state.grid.rowSelection = true;
+    $('#optRowSelection').checked = true;
+    saveState();
+    await applyOptions();
+  }
+  await grid.ready;
+  return true;
+};
+$('#apiCheck10').addEventListener('click', async () => {
+  if (!(await needChecks())) return;
+  // A range step: rows 0 … 9 in the current sort and filter (the same cost for 10 rows or 50 million).
+  setChecks({ checks: [{ from: 0, to: Math.min(9, grid.rowCount - 1), query: grid.getQuery(), checked: true }] });
+});
+$('#apiCheckAll').addEventListener('click', async () => {
+  if (!(await needChecks())) return;
+  setChecks({ checks: [{ from: 0, to: grid.rowCount - 1, query: grid.getQuery(), checked: true }] });
+});
+$('#apiCheckNone').addEventListener('click', () => { if (grid) setChecks({ checks: [] }); });
+$('#apiSelectAll').addEventListener('click', () => { grid?.selectAll(); grid?.focus(); });
+$('#apiCopy').addEventListener('click', () => grid?.copySelection());
+$('#apiToggleGroup').addEventListener('click', () => { if (state.mode === 'pivot') grid?.toggleGroup('rows', 0, 0); else toast('Groups are in pivot views.'); });
+$('#apiCancel').addEventListener('click', () => grid?.cancel());
+$('#apiRepaint').addEventListener('click', () => { grid?.repaint(); setEvent('Repainted (grid.repaint)'); });
+$('#apiBlockRows').addEventListener('change', (e) => { state.api.blockRows = Math.max(1, Number(e.target.value) || 100); saveState(); applyOptions(); });
+$('#apiBlockCols').addEventListener('change', (e) => { state.api.blockCols = Math.max(1, Number(e.target.value) || 20); saveState(); applyOptions(); });
 
 $('#togglePerf').addEventListener('click', () => {
   state.perfOpen = !state.perfOpen;
@@ -1667,14 +2422,19 @@ window.playground = { get grid() { return grid; }, get dataset() { return datase
 applyTheme();
 paintGen();
 paintVirtual();
+paintLive();
+paintAdv();
+paintApi();
+paintColumnsUi();
 paintServer();
 paintPerfToggle();
 renderPerf();
 if (location.hash) history.replaceState(null, '', location.pathname + location.search);
 // A CSV can't be restored from storage; regenerate the last generated dataset (or the default one).
 if (state.source.type === 'csv') { state.pivot = null; state.table.hidden = []; }
-if (state.source.type === 'virtual') {
-  $$('#sourceTabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === 'virtual')));
-  $$('.tabpanel').forEach((p) => { p.hidden = p.dataset.panel !== 'virtual'; });
-  loadVirtual();
+if (state.source.type === 'virtual' || state.source.type === 'live') {
+  const tab = state.source.type;
+  $$('#sourceTabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+  $$('.tabpanel').forEach((p) => { p.hidden = p.dataset.panel !== tab; });
+  if (tab === 'virtual') loadVirtual(); else loadLive();
 } else generateData();

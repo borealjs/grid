@@ -9,7 +9,7 @@
 <body>
   <div id="grid"></div>
   <script type="module">
-    import { createGrid, createArraySource, createRowSource } from '/packages/grid-core/dist/index.js';
+    import { createGrid, createArraySource } from '/packages/grid-core/dist/index.js';
     // A data source whose latency, failures and timing the test controls through window.__ctl:
     //   latency (ms), fail (reject every request), held (requests wait until release()), calls (counter).
     // Rows are served page by page (createRowSource) so scrolling and sorting each cost a request.
@@ -34,8 +34,7 @@
       if (ctl.held) ctl.waiters.push(go); else go();
     });
     const base = createArraySource(rows, { columns });
-    const source = createRowSource({
-      columns,
+    const source = {
       pageSize: 50,
       async getRows({ offset, limit, query, signal }) {
         ctl.calls.rows++;
@@ -46,13 +45,13 @@
         const [cells] = count ? await base.getCells({ rects: [{ row: offset, col: 0, rowCount: count, colCount: 4 }], query }) : [[]];
         return { rows: cells.map((r) => ({ id: r[0], name: r[1], city: r[2], amount: r[3] })), total: rowCount };
       },
-    });
+    };
     const events = (window.__events = []);
     const rec = (type) => (payload, extra) => events.push({ type, payload: JSON.parse(JSON.stringify(payload ?? null)), extra: extra ?? null });
     try {
       const grid = (window.__grid = createGrid(document.getElementById('grid'), {
-        dataSource: source, columns, ariaLabel: 'Controlled',
-        onError: rec('error'), onViewChange: rec('view'), onSortChange: rec('sort'), onFilterChange: rec('filter'),
+        data: source, columns, ariaLabel: 'Controlled',
+        onError: rec('error'), onViewChange: rec('view'), onQueryChange: (query, part) => rec(part)(query[part]),
       }));
       await grid.ready;
     } catch (err) {
